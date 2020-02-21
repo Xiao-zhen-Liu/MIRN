@@ -4,7 +4,6 @@ import os
 import tensorflow as tf
 import numpy as np
 import time
-
 from sklearn.model_selection import train_test_split
 from utils import multi_accuracy
 from model import M_IRN
@@ -12,19 +11,29 @@ from data_utils import process_dataset, MultiKnowledgeBase, KnowledgeBase
 
 flags = tf.flags
 
-flags.DEFINE_integer("embedding_dimension", 64, "words vector dimension [50]")
+flags.DEFINE_integer("embedding_dimension", 64, "KG vector dimension [64]")
 flags.DEFINE_integer("batch_size", 50, "batch size to use during training [50]")
-flags.DEFINE_integer("r_epoch", 5000, "number of epochs to use during training [5000]")
-flags.DEFINE_integer("e_epoch", 3, "number of middle epochs for embedding training [5]")
-flags.DEFINE_integer("a_epoch", 2, "number of inner epochs for alignment training [3]")
-flags.DEFINE_float("max_grad_norm", 20, "clip gradients to this norm [20]")
-flags.DEFINE_string("dataset", "en_en_zh", "question language + batch_kb1 language + kb2 language, "
-                                           "options are en_en_zh/en_zh_en/zh_en_zh/zh_zh_en")
+flags.DEFINE_integer("r_epoch", 2000, "number of epochs to use during training [2000]")
+flags.DEFINE_integer("e_epoch", 10, "number of middle epochs for embedding training [10]")
+flags.DEFINE_integer("a_fold", 3, "number of inner epochs for alignment training [3]")
+flags.DEFINE_float("max_grad_norm", 20, "clip gradients to this norm [10]")
+flags.DEFINE_float("alignment_ratio", 1, "Alignment seeds ratio [0.5]")
+flags.DEFINE_float("lr", 0.001, "Learning rate [0.001]")
+flags.DEFINE_float("epsilon", 1e-8, "Epsilon for Adam Optimizer [1e-8]")
+flags.DEFINE_string("dataset", "EN_en_zh_en", "dataset name")
 flags.DEFINE_string("checkpoint_dir", "checkpoint", "checkpoint directory")
 flags.DEFINE_string("data_dir", "data", "dataset directory")
-flags.DEFINE_boolean("resume", True, "Whether to resume last time's training")
-flags.DEFINE_integer("sentence_size", "0", "0")
-flags.DEFINE_integer("question_words", "0", "0")
+flags.DEFINE_boolean("resume", False, "Whether to resume last time's training")
+flags.DEFINE_boolean("direct_align", True, "Replace entity embedding alignment with actual alignment")
+flags.DEFINE_boolean("dual_matrices", False, "Whether to use two transfer matrices")
+flags.DEFINE_boolean("pre_kg", False, "Whether to train KG and alignment additionally before reasoning")
+flags.DEFINE_integer("sentence_size", 0, "")
+flags.DEFINE_integer("question_words", 0, "")
+flags.DEFINE_integer("hops", 0, "")
+flags.DEFINE_string("lan_que", "", "")
+flags.DEFINE_list("lan_labels", [], "")
+flags.DEFINE_list("steps", [], "")
+
 FLAGS = flags.FLAGS
 
 
@@ -33,25 +42,43 @@ def main(_):
 	if not os.path.exists(FLAGS.checkpoint_dir):
 		os.makedirs(FLAGS.checkpoint_dir)
 
-	dataset_substrings = FLAGS.dataset.split("_")
-	kb1_file = '%s/%s_triples.txt' % (FLAGS.data_dir, dataset_substrings[1])
-	kb2_file = '%s/%s_triples.txt' % (FLAGS.data_dir, dataset_substrings[2])
-	alignment_file = '%s/%s_%s_alignment.txt' % (FLAGS.data_dir, dataset_substrings[1], dataset_substrings[2])
-	data_file = '%s/%s.txt' % (FLAGS.data_dir, FLAGS.dataset)
+	d_labels = FLAGS.dataset.split("_")
+	additional = False if d_labels[-1] in {"zh", "en", "fr"} else True
+	lan_1 = d_labels[1]
+	kb1_file = '{}/{}_{}_KB.txt'.format(FLAGS.data_dir, lan_1, d_labels[-1]) if additional else '{}/{}_KB.txt'. \
+		format(FLAGS.data_dir, lan_1)
+	lan_2 = ""
+	for label in d_labels[1:]:
+		if label != lan_1:
+			lan_2 = label
+			break
+	kb2_file = '{}/{}_{}_KB.txt'.format(FLAGS.data_dir, lan_2, d_labels[-1]) if additional else '{}/{}_KB.txt'. \
+		format(FLAGS.data_dir, lan_2)
+	data_file = '{}/{}.txt'.format(FLAGS.data_dir, FLAGS.dataset)
+
+	dir = lan_1 + "_" + lan_2
+	is_flip =  True if dir in ["zh_fr", "en_fr", "zh_en"] else False
+
+	align_train_file = '{}/{}_{}_train.txt'.format(FLAGS.data_dir, lan_2 if is_flip else lan_1,
+	                                               lan_1 if is_flip else lan_2)
+	align_test_file = '{}/{}_{}_test.txt'.format(FLAGS.data_dir, lan_2 if is_flip else lan_1,
+	                                             lan_1 if is_flip else lan_2)  # Also used for table lookup
 
 	start = time.time()
+	print("Loading data...")
+
 	# build and store knowledge bases
 	kb1 = KnowledgeBase(kb1_file, name="kb1")
 	kb2 = KnowledgeBase(kb2_file, name="kb2")
-	multi_kb = MultiKnowledgeBase(kb1, kb2, alignment_file)
-	questions_ids, answers_id_one_hot, paths_ids, questions_strings, answers_ids, path_strings, FLAGS.sentence_size, \
-	word2id, FLAGS.question_words = process_dataset(data_file, multi_kb, is_cn=(dataset_substrings[0] == "zh"))
-	print("read data cost %f seconds" % (time.time() - start))
+	multi_kb = MultiKnowledgeBase(kb1, kb2, align_train_file, align_test_file, is_flip)
 
-	train_q, test_q, train_a, test_a, train_p, test_p = train_test_split(
-		questions_ids, answers_id_one_hot, paths_ids, test_size=.1, random_state=123)
-	train_q, valid_q, train_a, valid_a, train_p, valid_p = train_test_split(
-		train_q, train_a, train_p, test_size=.11, random_state=0)
+	q_ids, p_ids, q_strs, p_strs, qw2id, FLAGS.sentence_size, FLAGS.question_words, FLAGS.hops, \
+	FLAGS.lan_que, FLAGS.lan_labels, FLAGS.steps = process_dataset(data_file, multi_kb)
+
+	print("Data loading cost {} seconds".format(time.time() - start))
+
+	train_q, test_q, train_p, test_p = train_test_split(q_ids, p_ids, test_size=.1, random_state=123)
+	train_q, valid_q, train_p, valid_p = train_test_split(train_q, train_p, test_size=.11, random_state=0)
 
 	n_training = train_q.shape[0]
 	n_testing = test_q.shape[0]
@@ -61,8 +88,6 @@ def main(_):
 	print("Validation Size", n_validation)
 	print("Testing Size", n_testing)
 
-	print(flags.FLAGS.__flags)
-
 	# batch_id
 	# batches = [(start, end) for start, end in batches] abandon last few examples
 	batches = list(zip(range(0, n_training - FLAGS.batch_size, FLAGS.batch_size),
@@ -70,7 +95,7 @@ def main(_):
 
 	kb1_triples = multi_kb.kb1.triples
 	kb2_triples = multi_kb.kb2.triples
-	alignments = multi_kb.align_array
+	a_seeds = multi_kb.a_array_train
 
 	with tf.Session() as sess:
 		model = M_IRN(FLAGS, multi_kb, sess)
@@ -84,67 +109,126 @@ def main(_):
 		                                 range(FLAGS.batch_size, kb1_triples.shape[0], FLAGS.batch_size)))
 		kg2_embedding_batches = list(zip(range(0, kb2_triples.shape[0] - FLAGS.batch_size, FLAGS.batch_size),
 		                                 range(FLAGS.batch_size, kb2_triples.shape[0], FLAGS.batch_size)))
-		alignment_batches = list(zip(range(0, alignments.shape[0] - FLAGS.batch_size, FLAGS.batch_size),
-		                             range(FLAGS.batch_size, alignments.shape[0], FLAGS.batch_size)))
+		alignment_batches = list(zip(range(0, a_seeds.shape[0] - FLAGS.batch_size, FLAGS.batch_size),
+		                             range(FLAGS.batch_size, a_seeds.shape[0], FLAGS.batch_size)))
 
-		pre_val_predictions = model.predict(valid_q, valid_p)
-		best_val_epoch = -1
-		best_val_accuracy = multi_accuracy(valid_p, pre_val_predictions, multi_kb)
+		if FLAGS.pre_kg:
+			kg1_embedding_cost = 0.0
+			kg2_embedding_cost = 0.0
+			alignment_cost = 0.0
+			best_1_2 = 0.0
+			best_2_1 = 0.0
+			best_1_2_epoch = best_2_1_epoch = 0
+			for i in range(1, 400 + 1):
+				start = time.time()
+				print("MIRN KG epoch {} training...".format(i))
+				np.random.shuffle(kg1_embedding_batches)
+				np.random.shuffle(kg2_embedding_batches)
+				kg1_embedding_total_cost = 0.0
+				kg2_embedding_total_cost = 0.0
+				for s, e in kg1_embedding_batches:
+					kg1_embedding_total_cost += model.batch_train_kg1_embedding(kb1_triples[s:e])
+				kg1_embedding_cost = kg1_embedding_total_cost
+				for s, e in kg2_embedding_batches:
+					kg2_embedding_total_cost += model.batch_train_kg2_embedding(kb2_triples[s:e])
+				kg2_embedding_cost = kg2_embedding_total_cost
+				for j in range(FLAGS.a_fold):
+					np.random.shuffle(alignment_batches)
+					alignment_total_cost = 0.0
+					for s, e in alignment_batches:
+						alignment_total_cost += model.batch_train_alignment(a_seeds[s:e])
+					alignment_cost = alignment_total_cost
+				align_accu_1_2, align_accu_2_1 = model.align_res(alignments=multi_kb.a_array_test)
+
+				if align_accu_1_2 > best_1_2:
+					best_1_2_epoch = i
+					best_1_2 = align_accu_1_2
+
+				if align_accu_2_1 > best_2_1:
+					best_2_1_epoch = i
+					best_2_1 = align_accu_2_1
+
+				print('--------------------------------------------------------------------------------------------')
+				print('Epoch', i)
+				print('Timing', (time.time() - start))
+				print('Embedding total cost for KG1:', kg1_embedding_cost)
+				print('Embedding total cost for KG2:', kg2_embedding_cost)
+				print('Alignment total cost:', alignment_cost)
+				print('Alignment test accuracy: 1-2: {}, 2-1: {}.'.format(align_accu_1_2, align_accu_2_1))
+				print('Best 1-2 alignment epoch & accuracy: ', best_1_2_epoch, best_1_2)
+				print('Best 2-1 alignment epoch & accuracy: ', best_2_1_epoch, best_2_1)
+				print('--------------------------------------------------------------------------------------------')
+
+		pre_v_preds = model.predict(valid_q, valid_p)
+		pre_t_preds = model.predict(test_q, test_p)
+		best_v_ep = -1
+		best_v_accu, best_v_al = multi_accuracy(valid_p, pre_v_preds, multi_kb, FLAGS.steps, FLAGS.hops, FLAGS.lan_labels)
+		best_t_accu, best_t_al = multi_accuracy(test_p, pre_t_preds, multi_kb, FLAGS.steps, FLAGS.hops, FLAGS.lan_labels)
 
 		for t in range(1, FLAGS.r_epoch + 1):
 			start = time.time()
 			np.random.shuffle(batches)
-			embedding_cost_min = float("inf")
-			alignment_cost_min = float("inf")
-			for i in range(FLAGS.e_epoch):
+
+			kg1_embedding_cost = kg2_embedding_cost = alignment_cost = 0.0
+
+			print("MIRN multi epoch {} training...".format(t))
+
+			# e_epoch = 100 if t == 1 else FLAGS.e_epoch
+
+			for i in range(1, FLAGS.e_epoch + 1):
 				np.random.shuffle(kg1_embedding_batches)
 				np.random.shuffle(kg2_embedding_batches)
-				embedding_total_cost = 0.0
+				kg1_embedding_total_cost = 0.0
+				kg2_embedding_total_cost = 0.0
 				for s, e in kg1_embedding_batches:
-					embedding_total_cost += model.batch_train_kg1_embedding(kb1_triples[s:e])
+					kg1_embedding_total_cost += model.batch_train_kg1_embedding(kb1_triples[s:e])
+				kg1_embedding_cost = kg1_embedding_total_cost
 				for s, e in kg2_embedding_batches:
-					embedding_total_cost += model.batch_train_kg2_embedding(kb2_triples[s:e])
-				embedding_cost_min = min(embedding_cost_min, embedding_total_cost)
-				for j in range(1, FLAGS.a_epoch + 1):
-					np.random.shuffle(alignment_batches)
-					alignment_total_cost = 0.0
-					for s, e in alignment_batches:
-						alignment_total_cost += model.batch_train_alignment(alignments[s:e])
-					alignment_cost_min = min(alignment_cost_min, alignment_total_cost)
+					kg2_embedding_total_cost += model.batch_train_kg2_embedding(kb2_triples[s:e])
+				kg2_embedding_cost = kg2_embedding_total_cost
+			for j in range(FLAGS.a_fold):
+				np.random.shuffle(alignment_batches)
+				alignment_total_cost = 0.0
+				for s, e in alignment_batches:
+					alignment_total_cost += model.batch_train_alignment(a_seeds[s:e])
+				alignment_cost = alignment_total_cost
 
 			reasoning_total_cost = 0.0
 			for s, e in batches:
-				reasoning_total_cost += model.batch_train_inference(train_q[s:e], train_a[s:e],
-				                                                    np.argmax(train_a[s:e], axis=1), train_p[s:e])
+				reasoning_total_cost += model.batch_train_inference(train_q[s:e], train_p[s:e])
 
-			train_predictions = model.predict(train_q, train_p)
-			train_accuracy = multi_accuracy(train_p, train_predictions, multi_kb)
+			tr_preds = model.predict(train_q, train_p)
+			tr_accu, tr_al = multi_accuracy(train_p, tr_preds, multi_kb, FLAGS.steps, FLAGS.hops, FLAGS.lan_labels)
+			v_preds = model.predict(valid_q, valid_p)
+			v_accu, v_al = multi_accuracy(valid_p, v_preds, multi_kb, FLAGS.steps, FLAGS.hops, FLAGS.lan_labels)
+			t_preds = model.predict(test_q, test_p)
+			t_accu, t_al = multi_accuracy(test_p, t_preds, multi_kb, FLAGS.steps, FLAGS.hops, FLAGS.lan_labels)
+			align_accu_1_2, align_accu_2_1 = model.align_res(alignments=multi_kb.a_array_test)
 
-			valid_predictions = model.predict(valid_q, valid_p)
-			valid_accuracy = multi_accuracy(valid_p, valid_predictions, multi_kb)
-
-			if valid_accuracy[-3] > best_val_accuracy[-3]:
-				best_val_epoch = t
-				best_val_accuracy = valid_accuracy
+			if v_accu[-1] > best_v_accu[-1]:
+				best_v_ep = t
+				best_v_accu = v_accu
+				best_v_al = v_al
 				model.store()
+				best_t_accu = t_accu
+				best_t_al = t_al
 
-			print('-----------------------')
+			print('--------------------------------------------------------------------------------------------'
+			      '--------------------------------------------------------------------------------------------')
 			print('Epoch', t)
-			print('timing', (time.time() - start))
-			print('Embedding total cost:', embedding_cost_min)
-			print('Alignment total cost:', alignment_cost_min)
+			print('Timing', (time.time() - start))
+			print('Embedding total cost for KG1:', kg1_embedding_cost)
+			print('Embedding total cost for KG2:', kg2_embedding_cost)
+			print('Alignment total cost:', alignment_cost)
+			print('Alignment test accuracy: 1-2: {}, 2-1: {}.'.format(align_accu_1_2, align_accu_2_1))
 			print('Reasoning total cost:', reasoning_total_cost)
-			print('Training Accuracy:', train_accuracy[-3])
-			print('Training Alignment Accuracy:', train_accuracy[-1])
-			print('Training Alignment Missing rate:', train_accuracy[-2])
-			print('Training Accuracy for whole Path:', train_accuracy[0:-2])
-			print('Validation Accuracy:', valid_accuracy[-3])
-			print('Validation Alignment Accuracy:', valid_accuracy[-1])
-			print('Validation Alignment Missing rate:', valid_accuracy[-2])
-			print('Validation Accuracy for whole Path:', valid_accuracy[0:-2])
-			print('Best Validation epoch , accuracy for whole path, alignment accuracy and missing rate:',
-			      best_val_epoch, best_val_accuracy[0:-2], best_val_accuracy[-1], best_val_accuracy[-2])
-			print('-----------------------')
+			print('Training Accuracy:', tr_accu, tr_al)
+			print('Validation Accuracy:', v_accu, v_al)
+			print('Test Accuracy:', t_accu, t_al)
+			print('Best Validation epoch & accuracy for whole path:', best_v_ep, best_v_accu, best_v_al)
+			print('Test accuracy for whole path under best Validation epoch:', best_t_accu, best_t_al)
+			print('--------------------------------------------------------------------------------------------'
+			      '--------------------------------------------------------------------------------------------')
 
 
 if __name__ == '__main__':

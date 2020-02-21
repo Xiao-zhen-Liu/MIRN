@@ -78,88 +78,57 @@ def zero_nil_slot(t, name=None):
 		return tf.concat(axis=0, values=[z, tf.slice(t, [1, 0], [-1, -1])], name=name)
 
 
-def multi_accuracy(labels: np.ndarray, predictions: np.ndarray, multi_base: MultiKnowledgeBase):
+def multi_accuracy(labels: np.ndarray, predictions: np.ndarray, multi_base: MultiKnowledgeBase, steps: list,
+                   hops, lan_labels):
 	# compare path and final answer accuracy
 	accuracies = []
 
-	for i in range(6):
-		accuracies.append(round(metrics.accuracy_score(labels[:, i], predictions[:, i]), 3))
+	for i in range(steps[-1]+1):
+		accuracies.append(round(metrics.accuracy_score(labels[:, i], predictions[:, i]), 4))
 
 	align_dict_1_2 = multi_base.align_dict_1_2
-	alignment_labels = []
-	anf = 0
-	for ent_id in predictions[:, 2].tolist():
-		if ent_id in align_dict_1_2.keys():
-			alignment_labels.append(align_dict_1_2[ent_id])
-		else:
-			alignment_labels.append(0)
-			anf += 1
-	aligned_ids = predictions[:, 3].tolist()
-	l = len(alignment_labels)
-	accuracies.append(round(anf/l, 3))
-	a = 0
-	for i in range(l):
-		if alignment_labels[i] != 0:
-			if alignment_labels[i] == aligned_ids[i]:
-				a += 1
-		else:
-			l -= 1
-	accuracies.append(round(a/l, 3))
-	return accuracies
-
-
-def RealAnswer(labels, pathpreds):
-	'''find answer-list from path-list'''
-	batch_size = pathpreds.shape[0]
-	anspreds = np.zeros(batch_size, dtype=int)
-	for j in range(batch_size):
-		k = len(labels[0]) - 1
-		while (labels[j, k] == 0):
-			k -= 2
-		anspreds[j] = pathpreds[j, k]
-	return anspreds
-
-
-def ScoreRank(label, scores):
-	indexrank = np.argsort(-scores)
-	rank = 0.0
-	for i in range(len(label)):
-		row_rank = np.where(indexrank[i] == label[i])[0][0]  # ([0], )
-		if row_rank < 3:
-			rank += 1
-	return round(rank / len(label), 3)
-
-
-def InSet(labels, anset, preds):
-	'''get accuracy(whether in answer set or not),
-    labels does not matter
-        predictions is path-list
-    labels is path-labels'''
-	right = 0.0
-	for i in range(len(anset)):
-		if type(preds[i]) is np.int64:
-			ans_pred = preds[i]
-		else:
-			ans_pred = preds[i, -1]
-		if ans_pred in anset[i]:
-			right += 1
-	return round(right / len(anset), 3)
-
-
-def InnerRight(preds, KBs):
-	Acc = []
-	pl = len(preds[0]) - 2
-	batch = len(preds)
-	flags = np.ones(batch)
-	for l in range(0, pl, 2):
-		right = 0.0
-		for j in range(batch):
-			if flags[j] == 0:
-				continue
-			key = preds[j, l] * 7 + preds[j, l + 1]
-			if preds[j, l + 2] in KBs[key]:
-				right += 1
+	align_dict_2_1 = multi_base.align_dict_2_1
+	align_accuracies = "Alignment accuracy on reasoning:"
+	for i in range(hops - 1):
+		if lan_labels[i + 1] != lan_labels[i]:
+			if lan_labels[i + 1] == lan_labels[0]:
+				anf = 0
+				alignment_labels = []
+				for ent_id in predictions[:, steps[i+1]].tolist():
+					if ent_id in align_dict_2_1.keys():
+						alignment_labels.append(align_dict_2_1[ent_id])
+					else:
+						alignment_labels.append(0)
+						anf += 1
+				aligned_ids = predictions[:, steps[i+1]+1].tolist()
+				l = len(alignment_labels)
+				align_accuracies += "\nAlign miss rate 2-1: " + str(round(anf / l, 4))
+				a = 0
+				for i in range(l):
+					if alignment_labels[i] != 0:
+						if alignment_labels[i] == aligned_ids[i]:
+							a += 1
+					else:
+						l -= 1
+				align_accuracies += ", Align accuracy 2-1: " + (str(round(a / l, 4)) if l > 0 else str(0))
 			else:
-				flags[j] = 0
-		Acc.append(round(right / batch, 3))
-	return Acc
+				anf = 0
+				alignment_labels = []
+				for ent_id in predictions[:, steps[i+1]].tolist():
+					if ent_id in align_dict_1_2.keys():
+						alignment_labels.append(align_dict_1_2[ent_id])
+					else:
+						alignment_labels.append(0)
+						anf += 1
+				aligned_ids = predictions[:, steps[i+1]+1].tolist()
+				l = len(alignment_labels)
+				align_accuracies += "\nAlign miss rate 1-2: " + str(round(anf / l, 4))
+				a = 0
+				for i in range(l):
+					if alignment_labels[i] != 0:
+						if alignment_labels[i] == aligned_ids[i]:
+							a += 1
+					else:
+						l -= 1
+				align_accuracies += ", Align accuracy 1-2: " + (str(round(a / l, 4)) if l > 0 else str(0))
+	return accuracies, align_accuracies

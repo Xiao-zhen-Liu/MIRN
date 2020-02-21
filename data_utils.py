@@ -43,7 +43,7 @@ def get_knowledge_base(knowledge_base_file, ent2id, rel2id, separator="@@@"):
 	"""
 Create the KB Matrix whose elements are integers representing the knowledge base.
     :param separator: used to split a line of data
-:param knowledge_base_file: Knowledge base file whose triples are separated by separator.
+:param knowledge_base_file: Knowledge base file whose triples are separated by path_sep.
 :param ent2id: Entity to ID dictionary.
 :param rel2id: Relation to ID dictionary.
 :return: Triples Numpy Array, KB Matrix whose maximum column index is the maximum number of tails for a single
@@ -51,7 +51,7 @@ head entity and relation pair, maximum tail number.
 """
 	n_entities = len(ent2id)
 	n_relations = len(rel2id)
-	tails = np.zeros([n_entities * n_relations, 1], 'int32')
+	# tails = np.zeros([n_entities * n_relations, 1], 'int32')
 	triples = []
 
 	with open(knowledge_base_file, encoding="utf-8") as f:
@@ -62,42 +62,48 @@ head entity and relation pair, maximum tail number.
 			r = rel2id[line[1]]
 			t = ent2id[line[2]]
 			triples.append([h, r, t])  # [h,r]->[h*n_relations+r]
-			tails[h * n_relations + r] += 1
+			# tails[h * n_relations + r] += 1
 
-	return np.array(triples), np.max(tails)
+	return np.array(triples) #, np.max(tails)
 
 
-def read_dataset(data_file, separator="@@@", is_cn=False):
-	"""
-question@@@answer@@@e1(l1)#r1(l1)#e2(l1)#e2(l2)#r2(l2)#e3(l2)
-"""
+def read_dataset(data_file: str, data_sep = "\t"):
 	if os.path.isfile(data_file):
 		with open(data_file, encoding="utf-8") as f:
 			lines = f.readlines()
 	else:
 		raise Exception("!! %s is not found!!" % data_file)
-
-	data = []
+	labels = data_file.split(".")[0].split("_")
+	lan_que = labels[0].lower()
+	hops = (len(labels) - 1) if labels[-1] in {"zh", "en", "fr"} else (len(labels) - 2)
+	print("Detected {} hop reasoning.".format(str(hops)))
+	lan_labels = labels[1:hops+1]
+	lan_labels.append(lan_labels[-1])
+	# len(steps) == len(lan_labels) + 1, because the last reasoning is a dummy one
+	steps = [0, 2]
+	for i in range(hops - 1):
+		if lan_labels[i + 1] == lan_labels[i]:
+			steps.append(steps[i+1] + 2)
+		else:
+			steps.append(steps[i+1] + 3)
+	is_cn = True if lan_que == "zh" else False
+	data = []  # question answer path
 	questions = []
-	word2id = {'<unk>': 0}
-	if is_cn:
-		jieba.load_userdict("data/zh_ent_dict.txt")
+	qw2id = {'<unk>': 0}
 	for line in lines:
-		line = line.strip().split(separator)
-
+		line = line.strip().split(data_sep)
 		if is_cn:
-			line[0] = " ".join(jieba.cut(line[0], cut_all=True))  # Use jieba to do word cut
-
+			line[0] = " ".join(jieba.cut(line[0], cut_all=True))  # Use jieba to do word segmentation
 		q_words_list = line[0].strip().split()
-		data.append([line[0], line[1], line[2]])
+		data.append([line[0], line[1]])
 		for w in q_words_list:
-			if w not in word2id.keys():
-				word2id[w] = len(word2id)
+			if w not in qw2id.keys():
+				qw2id[w] = len(qw2id)
 		questions.append(q_words_list)
 
 	sentence_size = max(len(i) for i in questions)
 
-	return data, sentence_size, word2id
+	return data, sentence_size, qw2id, hops, lan_que, lan_labels, steps
 
 
 class KnowledgeBase(object):
@@ -110,71 +116,140 @@ class KnowledgeBase(object):
 		self.entities = ent2id.keys()
 		self.relations = rel2id.keys()
 		self.rel2id = rel2id
+		self.id2rel = {value:key for key, value in self.rel2id.items()}
 		self.ent2id = ent2id
+		self.id2ent = {value:key for key, value in self.ent2id.items()}
+		self.id2ent[-1] = '<unk>'
 		self.n_entities = len(self.ent2id)
 		self.n_relations = len(self.rel2id)
 
 		print('here are %d relations in rel2id(relation_vocabulary)' % self.n_relations)
 		print('here are %d entities in ent2id(entity_vocabulary)' % self.n_entities)
 
-		self.triples, self.tails_size = get_knowledge_base(knowledge_base_file, self.ent2id, self.rel2id)
+		# self.triples, self.tails_size = get_knowledge_base(knowledge_base_file, self.ent2id, self.rel2id)
+
+		self.triples = get_knowledge_base(knowledge_base_file, self.ent2id, self.rel2id)
 
 		print("#number of Triples", len(self.triples))
 
 
 class MultiKnowledgeBase(object):
 
-	def __init__(self, kb1: KnowledgeBase, kb2: KnowledgeBase, alignment_file: str, separator="@@@"):
-		self.align_dict_1_2 = {}
-		self.align_dict_2_1 = {}
-		self.align_array = []
-		self.n_align = 0
+	def __init__(self, kb1:KnowledgeBase, kb2:KnowledgeBase, align_train, align_test, is_flip:False, separator="&&&"):
+		self.a_array_all = []
+		self.a_array_train = []
+		self.a_array_test = []
 		self.kb1 = kb1
 		self.kb2 = kb2
+		self.align_dict_1_2 = {}
+		self.align_dict_2_1 = {}
 		self.name = self.kb1.name + "+" + self.kb2.name
-		with open(alignment_file, "r", encoding="utf-8", ) as af:
-			for line in af.readlines():
+		with open(align_train, "r", encoding="utf-8") as atrd:
+			for line in atrd.readlines():
 				line = line.strip().split(separator)
 				e1 = None
 				e2 = None
-				if line[0] in self.kb1.ent2id.keys():
-					e1 = self.kb1.ent2id[line[0]]
-				if line[1] in self.kb2.ent2id.keys():
-					e2 = self.kb2.ent2id[line[1]]
+				l0 = line[0] if not is_flip else line[1]
+				l1 = line[1] if not is_flip else line[0]
+				if l0 in self.kb1.ent2id.keys():
+					e1 = self.kb1.ent2id[l0]
+				if l1 in self.kb2.ent2id.keys():
+					e2 = self.kb2.ent2id[l1]
 				if e1 is not None and e2 is not None:
-					self.align_array.append((e1, e2))
+					self.a_array_all.append((e1, e2))
 					self.align_dict_1_2[e1] = e2
 					self.align_dict_2_1[e2] = e1
-					self.n_align += 1
-		self.align_array = np.array(self.align_array)
-		print("Loaded aligned entities from", alignment_file, ". #pairs:", self.n_align)
+					self.a_array_train.append((e1, e2))
+		with open(align_test, "r", encoding="utf-8") as atrd:
+			for line in atrd.readlines():
+				line = line.strip().split(separator)
+				e1 = None
+				e2 = None
+				l0 = line[0] if not is_flip else line[1]
+				l1 = line[1] if not is_flip else line[0]
+				if l0 in self.kb1.ent2id.keys():
+					e1 = self.kb1.ent2id[l0]
+				if l1 in self.kb2.ent2id.keys():
+					e2 = self.kb2.ent2id[l1]
+				if e1 is not None and e2 is not None:
+					self.a_array_all.append((e1, e2))
+					self.align_dict_1_2[e1] = e2
+					self.align_dict_2_1[e2] = e1
+					self.a_array_test.append((e1, e2))
+		self.a_array_all = np.array(self.a_array_all)
+		self.a_array_train = np.array(self.a_array_train)
+		self.a_array_test = np.array(self.a_array_test)
+
+		print("Loaded alignment test pairs (used in QA dataset and MTransE testing) from", align_test,
+		      ". #pairs:", len(self.a_array_test))
+		print("Loaded alignment train pairs (used for MTransE training) from", align_train,
+		      ". #pairs:", len(self.a_array_train))
+		print("Total alignments: ", len(self.a_array_all))
+		print("Train-test ratio: ", 100*len(self.a_array_train)/len(self.a_array_all), "% : ",
+		      100*len(self.a_array_test)/len(self.a_array_all), "%")
 
 
-def process_dataset(data_file, multi_kb: MultiKnowledgeBase, separator="@@@", is_cn=False):
-	data, sentence_size, word2id = read_dataset(data_file, separator, is_cn)
-	print('here are %d words in word2id(question vocab)' % len(word2id))
-	kb2_ent2id = ans2id = multi_kb.kb2.ent2id
+def process_dataset(data_file, multi_kb: MultiKnowledgeBase, data_sep="\t", path_sep="###", triple_sep="@@@"):
+	data, sentence_size, qw2id, hops, lan_que, lan_labels, steps = read_dataset(data_file, data_sep)
+	print('here are %d words in word2id(question vocab)' % len(qw2id))
+	kb2_ent2id = multi_kb.kb2.ent2id
 	kb1_ent2id = multi_kb.kb1.ent2id
 	kb1_rel2id = multi_kb.kb1.rel2id
 	kb2_rel2id = multi_kb.kb2.rel2id
 	questions_ids = []
 	questions_strings = []
-	answers_id_one_hot = []
-	answers_id = []
 	paths_ids = []
 	paths_strings = []
-	for q_str, a_str, p_str in data:
+	for q_str, p_str in data:
 		q_strings = q_str.strip().split()
-		questions_ids.append([word2id[w] for w in q_strings] + [0] * max(0, sentence_size - len(q_strings)))
+		questions_ids.append([qw2id[w] for w in q_strings] + [0] * max(0, sentence_size - len(q_strings)))
 		questions_strings.append(q_strings)
 		# answer id one-hot
-		a_one_hot = np.zeros(len(ans2id))
-		a_one_hot[ans2id[a_str]] = 1
-		answers_id_one_hot.append(a_one_hot)
-		answers_id.append(ans2id[a_str])
-		p_str = p_str.strip().split("#")
-		paths_strings.append(p_str)
-		paths_ids.append([kb1_ent2id[p_str[0]], kb1_rel2id[p_str[1]], kb1_ent2id[p_str[2]], kb2_ent2id[p_str[3]],
-		                  kb2_rel2id[p_str[4]], kb2_ent2id[p_str[5]]])
-	return np.array(questions_ids), np.array(answers_id_one_hot), np.array(paths_ids), questions_strings, answers_id, \
-	       paths_strings, sentence_size, word2id, len(word2id)
+		p_trps = p_str.strip().split(path_sep)
+		paths_strings.append(p_trps)
+		tps = []
+		for triple in p_trps:
+			tps.append(triple.split(triple_sep))
+		p_ids = [kb1_ent2id[tps[0][0]], kb1_rel2id[tps[0][1]], kb1_ent2id[tps[0][2]]]
+		for i in range(hops - 1):
+			cur_tp = tps[i + 1]
+			if lan_labels[i + 1] == lan_labels[i]:
+				if lan_labels[i + 1] == lan_labels[0]:
+					p_ids.extend([kb1_rel2id[cur_tp[1]], kb1_ent2id[cur_tp[2]]])
+				else:
+					p_ids.extend([kb2_rel2id[cur_tp[1]], kb2_ent2id[cur_tp[2]]])
+			else:
+				if lan_labels[i + 1] == lan_labels[0]:
+					p_ids.extend([kb1_ent2id[cur_tp[0]], kb1_rel2id[cur_tp[1]], kb1_ent2id[cur_tp[2]]])
+				else:
+					p_ids.extend([kb2_ent2id[cur_tp[0]], kb2_rel2id[cur_tp[1]], kb2_ent2id[cur_tp[2]]])
+		paths_ids.append(p_ids)
+	return np.array(questions_ids), np.array(paths_ids), questions_strings, paths_strings, qw2id, sentence_size,\
+	       len(qw2id), hops, lan_que, lan_labels, steps
+
+def recover_predictions(output_file, predictions: np.ndarray, multi_kb: MultiKnowledgeBase, hops, lan_labels, steps,
+                        separator="@@@"):
+	out_strs = []
+	kb2_id2ent = multi_kb.kb2.id2ent
+	kb1_id2ent = multi_kb.kb1.id2ent
+	kb1_id2rel = multi_kb.kb1.id2rel
+	kb2_id2rel = multi_kb.kb2.id2rel
+	for ist in predictions:
+		str = kb1_id2ent[ist[0]]+separator+kb1_id2rel[ist[1]]+separator+kb1_id2ent[ist[2]]+separator
+		for i in range(hops - 1):
+			if lan_labels[i + 1] == lan_labels[i]:
+				if lan_labels[i + 1] == lan_labels[0]:
+					str+=kb1_id2rel[ist[steps[i + 1] + 1]]+separator+kb1_id2ent[ist[steps[i + 1] + 2]]+separator
+				else:
+					str+=kb2_id2rel[ist[steps[i + 1] + 1]]+separator+kb2_id2ent[ist[steps[i + 1] + 2]]+separator
+			else:
+				if lan_labels[i + 1] == lan_labels[0]:
+					str+=kb1_id2ent[ist[steps[i + 1] + 1]]+separator+kb1_id2rel[ist[steps[i + 1] + 2]]+separator+\
+					              kb1_id2ent[ist[steps[i + 1] + 3]]+separator
+				else:
+					str+=kb2_id2ent[ist[steps[i + 1] + 1]]+separator+kb2_id2rel[ist[steps[i + 1] + 2]]+separator+\
+					              kb2_id2ent[ist[steps[i + 1] + 3]]+separator
+		str = str.strip(separator) + "\n"
+		out_strs.append(str)
+	with open(output_file, "w", encoding="utf-8") as of:
+		of.writelines(out_strs)
