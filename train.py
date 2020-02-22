@@ -15,7 +15,7 @@ flags.DEFINE_integer("embedding_dimension", 64, "KG vector dimension [64]")
 flags.DEFINE_integer("batch_size", 50, "batch size to use during training [50]")
 flags.DEFINE_integer("r_epoch", 2000, "number of epochs to use during training [2000]")
 flags.DEFINE_integer("e_epoch", 10, "number of middle epochs for embedding training [10]")
-flags.DEFINE_integer("a_fold", 5, "number of inner epochs for alignment training [3]")
+flags.DEFINE_integer("a_fold", 3, "number of inner epochs for alignment training [3]")
 flags.DEFINE_float("max_grad_norm", 20, "clip gradients to this norm [10]")
 flags.DEFINE_float("alignment_ratio", 1, "Alignment seeds ratio [0.5]")
 flags.DEFINE_float("lr", 0.001, "Learning rate [0.001]")
@@ -91,6 +91,7 @@ def main(_):
 	# batch_id
 	# batches = [(start, end) for start, end in batches] abandon last few examples
 	tr_batches = create_batch(n_training, FLAGS.batch_size)
+	tr_batches_test = create_batch(n_training, FLAGS.batch_size)
 	v_batches =  create_batch(n_validation, FLAGS.batch_size)
 	t_batches =  create_batch(n_testing, FLAGS.batch_size)
 
@@ -197,7 +198,7 @@ def main(_):
 			for s, e in tr_batches:
 				reasoning_total_cost += model.batch_train_inference(train_q[s:e], train_p[s:e])
 
-			tr_preds = model.predict(train_q, train_p, tr_batches)
+			tr_preds = model.predict(train_q, train_p, tr_batches_test)
 			tr_accu, tr_al = multi_accuracy(train_p, tr_preds, multi_kb, FLAGS.steps, FLAGS.hops, FLAGS.lan_labels)
 			v_preds = model.predict(valid_q, valid_p, v_batches)
 			v_accu, v_al = multi_accuracy(valid_p, v_preds, multi_kb, FLAGS.steps, FLAGS.hops, FLAGS.lan_labels)
