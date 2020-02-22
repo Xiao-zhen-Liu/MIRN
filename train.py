@@ -5,7 +5,7 @@ import tensorflow as tf
 import numpy as np
 import time
 from sklearn.model_selection import train_test_split
-from utils import multi_accuracy
+from utils import multi_accuracy, create_batch
 from model import M_IRN
 from data_utils import process_dataset, MultiKnowledgeBase, KnowledgeBase
 
@@ -15,7 +15,7 @@ flags.DEFINE_integer("embedding_dimension", 64, "KG vector dimension [64]")
 flags.DEFINE_integer("batch_size", 50, "batch size to use during training [50]")
 flags.DEFINE_integer("r_epoch", 2000, "number of epochs to use during training [2000]")
 flags.DEFINE_integer("e_epoch", 10, "number of middle epochs for embedding training [10]")
-flags.DEFINE_integer("a_fold", 3, "number of inner epochs for alignment training [3]")
+flags.DEFINE_integer("a_fold", 5, "number of inner epochs for alignment training [3]")
 flags.DEFINE_float("max_grad_norm", 20, "clip gradients to this norm [10]")
 flags.DEFINE_float("alignment_ratio", 1, "Alignment seeds ratio [0.5]")
 flags.DEFINE_float("lr", 0.001, "Learning rate [0.001]")
@@ -90,12 +90,14 @@ def main(_):
 
 	# batch_id
 	# batches = [(start, end) for start, end in batches] abandon last few examples
-	batches = list(zip(range(0, n_training - FLAGS.batch_size, FLAGS.batch_size),
-	                   range(FLAGS.batch_size, n_training, FLAGS.batch_size)))
+	tr_batches = create_batch(n_training, FLAGS.batch_size)
+	v_batches =  create_batch(n_validation, FLAGS.batch_size)
+	t_batches =  create_batch(n_testing, FLAGS.batch_size)
 
 	kb1_triples = multi_kb.kb1.triples
 	kb2_triples = multi_kb.kb2.triples
 	a_seeds = multi_kb.a_array_train
+	a_tests = multi_kb.a_array_test
 
 	with tf.Session() as sess:
 		model = M_IRN(FLAGS, multi_kb, sess)
@@ -105,12 +107,10 @@ def main(_):
 
 		print("knowledge base 1 size", kb1_triples.shape[0])
 		print("knowledge base 2 size", kb2_triples.shape[0])
-		kg1_embedding_batches = list(zip(range(0, kb1_triples.shape[0] - FLAGS.batch_size, FLAGS.batch_size),
-		                                 range(FLAGS.batch_size, kb1_triples.shape[0], FLAGS.batch_size)))
-		kg2_embedding_batches = list(zip(range(0, kb2_triples.shape[0] - FLAGS.batch_size, FLAGS.batch_size),
-		                                 range(FLAGS.batch_size, kb2_triples.shape[0], FLAGS.batch_size)))
-		alignment_batches = list(zip(range(0, a_seeds.shape[0] - FLAGS.batch_size, FLAGS.batch_size),
-		                             range(FLAGS.batch_size, a_seeds.shape[0], FLAGS.batch_size)))
+		kg1_embedding_batches =  create_batch(kb1_triples.shape[0], FLAGS.batch_size)
+		kg2_embedding_batches = create_batch(kb2_triples.shape[0], FLAGS.batch_size)
+		align_tr_batches = create_batch(a_seeds.shape[0], FLAGS.batch_size)
+		align_t_batches = create_batch(a_tests.shape[0], FLAGS.batch_size)
 
 		if FLAGS.pre_kg:
 			kg1_embedding_cost = 0.0
@@ -133,12 +133,12 @@ def main(_):
 					kg2_embedding_total_cost += model.batch_train_kg2_embedding(kb2_triples[s:e])
 				kg2_embedding_cost = kg2_embedding_total_cost
 				for j in range(FLAGS.a_fold):
-					np.random.shuffle(alignment_batches)
+					np.random.shuffle(align_tr_batches)
 					alignment_total_cost = 0.0
-					for s, e in alignment_batches:
+					for s, e in align_tr_batches:
 						alignment_total_cost += model.batch_train_alignment(a_seeds[s:e])
 					alignment_cost = alignment_total_cost
-				align_accu_1_2, align_accu_2_1 = model.align_res(alignments=multi_kb.a_array_test)
+				align_accu_1_2, align_accu_2_1 = model.align_res(a_tests, align_t_batches)
 
 				if align_accu_1_2 > best_1_2:
 					best_1_2_epoch = i
@@ -159,15 +159,15 @@ def main(_):
 				print('Best 2-1 alignment epoch & accuracy: ', best_2_1_epoch, best_2_1)
 				print('--------------------------------------------------------------------------------------------')
 
-		pre_v_preds = model.predict(valid_q, valid_p)
-		pre_t_preds = model.predict(test_q, test_p)
+		pre_v_preds = model.predict(valid_q, valid_p, v_batches)
+		pre_t_preds = model.predict(test_q, test_p, t_batches)
 		best_v_ep = -1
 		best_v_accu, best_v_al = multi_accuracy(valid_p, pre_v_preds, multi_kb, FLAGS.steps, FLAGS.hops, FLAGS.lan_labels)
 		best_t_accu, best_t_al = multi_accuracy(test_p, pre_t_preds, multi_kb, FLAGS.steps, FLAGS.hops, FLAGS.lan_labels)
 
 		for t in range(1, FLAGS.r_epoch + 1):
 			start = time.time()
-			np.random.shuffle(batches)
+			np.random.shuffle(tr_batches)
 
 			kg1_embedding_cost = kg2_embedding_cost = alignment_cost = 0.0
 
@@ -187,23 +187,23 @@ def main(_):
 					kg2_embedding_total_cost += model.batch_train_kg2_embedding(kb2_triples[s:e])
 				kg2_embedding_cost = kg2_embedding_total_cost
 			for j in range(FLAGS.a_fold):
-				np.random.shuffle(alignment_batches)
+				np.random.shuffle(align_tr_batches)
 				alignment_total_cost = 0.0
-				for s, e in alignment_batches:
+				for s, e in align_tr_batches:
 					alignment_total_cost += model.batch_train_alignment(a_seeds[s:e])
 				alignment_cost = alignment_total_cost
 
 			reasoning_total_cost = 0.0
-			for s, e in batches:
+			for s, e in tr_batches:
 				reasoning_total_cost += model.batch_train_inference(train_q[s:e], train_p[s:e])
 
-			tr_preds = model.predict(train_q, train_p)
+			tr_preds = model.predict(train_q, train_p, tr_batches)
 			tr_accu, tr_al = multi_accuracy(train_p, tr_preds, multi_kb, FLAGS.steps, FLAGS.hops, FLAGS.lan_labels)
-			v_preds = model.predict(valid_q, valid_p)
+			v_preds = model.predict(valid_q, valid_p, v_batches)
 			v_accu, v_al = multi_accuracy(valid_p, v_preds, multi_kb, FLAGS.steps, FLAGS.hops, FLAGS.lan_labels)
-			t_preds = model.predict(test_q, test_p)
+			t_preds = model.predict(test_q, test_p, t_batches)
 			t_accu, t_al = multi_accuracy(test_p, t_preds, multi_kb, FLAGS.steps, FLAGS.hops, FLAGS.lan_labels)
-			align_accu_1_2, align_accu_2_1 = model.align_res(alignments=multi_kb.a_array_test)
+			align_accu_1_2, align_accu_2_1 = model.align_res(a_tests, align_t_batches)
 
 			if v_accu[-1] > best_v_accu[-1]:
 				best_v_ep = t

@@ -4,7 +4,7 @@ import os
 import tensorflow as tf
 import time
 from sklearn.model_selection import train_test_split
-from utils import multi_accuracy
+from utils import multi_accuracy, create_batch
 from model import M_IRN
 from data_utils import process_dataset, MultiKnowledgeBase, KnowledgeBase, recover_predictions
 
@@ -72,23 +72,22 @@ def main(_):
     print("Data loading cost {} seconds".format(time.time() - start))
 
     train_q, test_q, train_p, test_p = train_test_split(q_ids, p_ids, test_size=.1, random_state=123)
-    train_q, valid_q, train_p, valid_p = train_test_split(train_q, train_p, test_size=.11, random_state=0)
 
-    n_training = train_q.shape[0]
     n_testing = test_q.shape[0]
-    n_validation = valid_q.shape[0]
 
-    print("Training Size", n_training)
-    print("Validation Size", n_validation)
     print("Testing Size", n_testing)
+
+    t_batches = create_batch(n_testing, FLAGS.batch_size)
+    a_tests = multi_kb.a_array_test
+    align_t_batches = create_batch(a_tests.shape[0], FLAGS.batch_size)
 
     with tf.Session() as sess:
         model = M_IRN(FLAGS, multi_kb, sess)
 
         model.load()
-        t_preds = model.predict(test_q, test_p)
+        t_preds = model.predict(test_q, test_p, t_batches)
         t_accu, t_al = multi_accuracy(test_p, t_preds, multi_kb, FLAGS.steps, FLAGS.hops, FLAGS.lan_labels)
-        align_accu_1_2, align_accu_2_1 = model.align_res(alignments=multi_kb.a_array_test)
+        align_accu_1_2, align_accu_2_1 = model.align_res(a_tests, align_t_batches)
         recov_name = data_file.strip(".txt") + "_predictions.txt"
 
         print('-----------------------')

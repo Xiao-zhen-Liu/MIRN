@@ -132,3 +132,8 @@ def multi_accuracy(labels: np.ndarray, predictions: np.ndarray, multi_base: Mult
 						l -= 1
 				align_accuracies += ", Align accuracy 1-2: " + (str(round(a / l, 4)) if l > 0 else str(0))
 	return accuracies, align_accuracies
+
+def create_batch(instances, batch_size):
+	s = list(zip(range(0, instances - batch_size, batch_size), range(batch_size, instances, batch_size)))
+	s.append(((instances - instances % batch_size, instances)))
+	return s

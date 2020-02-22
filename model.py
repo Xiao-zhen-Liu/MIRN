@@ -100,7 +100,7 @@ class M_IRN(object):
 
         inference_train_op = self._opt.apply_gradients(inference_nil_grads_and_vars, name="inference_train_op")
 
-        # predict ops
+        # batch_predict ops
         inference_predict_op = inference_path
 
         # assign ops
@@ -433,7 +433,7 @@ class M_IRN(object):
         self._que_emb = self._sess.run(self._q_norm)
         return loss
 
-    def predict(self, queries, paths):
+    def batch_predict(self, queries, paths):
         """Predicts answers as one-hot encoding.
 
         Args:
@@ -450,8 +450,19 @@ class M_IRN(object):
         feed_dict = {self._queries: queries, self._paths: paths, self._zeros: zeros, self._isTrain: 1}
         return self._sess.run(self.inference_predict_op, feed_dict=feed_dict)
 
-    def align_res(self, alignments):
-        aligned_1, aligned_2 = self._sess.run([self.ali_res_1, self.ali_res_2], feed_dict={self._alignments: alignments})
+    def predict(self, quires, path, batches):
+        res = []
+        for s, e in batches:
+            res.extend(self.batch_predict(quires[s:e], path[s:e]))
+        return np.array(res)
+
+    def align_res(self, alignments, batches):
+        aligned_1 = []
+        aligned_2 = []
+        for s, e in batches:
+            a1, a2 = self._sess.run([self.ali_res_1, self.ali_res_2], feed_dict={self._alignments: alignments[s:e]})
+            aligned_1.extend(a1)
+            aligned_2.extend(a2)
         return metrics.accuracy_score(alignments[:, 1], aligned_2), metrics.accuracy_score(alignments[:, 0], aligned_1)
 
     def store(self):
