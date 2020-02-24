@@ -137,3 +137,17 @@ def create_batch(instances, batch_size):
 	s = list(zip(range(0, instances - batch_size, batch_size), range(batch_size, instances, batch_size)))
 	s.append(((instances - instances % batch_size, instances)))
 	return s
+
+
+def orthogonal(shape):
+  flat_shape = (shape[0], np.prod(shape[1:]))
+  a = np.random.normal(0.0, 1.0, flat_shape)
+  u, _, v = np.linalg.svd(a, full_matrices=False)
+  q = u if u.shape == flat_shape else v
+  return q.reshape(shape)
+
+
+def orthogonal_initializer(scale=1.0, dtype=tf.float32):
+  def _initializer(shape, dtype=tf.float32, partition_info=None):
+    return tf.constant(orthogonal(shape) * scale, dtype)
+  return _initializer

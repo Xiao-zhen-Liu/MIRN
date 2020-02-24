@@ -1,11 +1,13 @@
 # coding=utf-8
 from __future__ import print_function
 import os
+from platform import system
+
 import numpy as np
 import tensorflow as tf
 from sklearn import metrics
 from data_utils import MultiKnowledgeBase
-from utils import add_gradient_noise, zero_nil_slot
+from utils import add_gradient_noise, zero_nil_slot, orthogonal_initializer
 
 
 class M_IRN(object):
@@ -30,7 +32,10 @@ class M_IRN(object):
         self._ent_size_1 = self._multi_kb.kb1.n_entities
         self._ent_size_2 = self._multi_kb.kb2.n_entities
         self._init = tf.contrib.layers.xavier_initializer()
-        self._opt = tf.train.AdamOptimizer(learning_rate=config.lr, epsilon=config.epsilon)
+        self._orthogonal_init = orthogonal_initializer()
+        self._opt = tf.train.AdamOptimizer(learning_rate=config.lr, epsilon=config.epsilon, name="opt")
+        self._AM_opt = tf.train.AdamOptimizer(learning_rate=config.lr * config.ar, epsilon=config.epsilon,
+                                              name="AM_opt")
         self._name = "M_IRN"
         self._checkpoint_dir = config.checkpoint_dir + '/' + self._name
 
@@ -78,7 +83,7 @@ class M_IRN(object):
         # alignment train and loss
         alignment_batch_loss, ali_res_1_op, ali_res_2_op = self._align()
         alignment_loss_op = tf.reduce_sum(alignment_batch_loss, name="alignment_loss_op")
-        alignment_train_op = self._opt.minimize(alignment_loss_op)
+        alignment_train_op = self._AM_opt.minimize(alignment_loss_op)
 
         # cross entropy as loss for inference:
         batch_loss, inference_path = self._inference()  # (batch_size, 1), (batch_size, 6)
@@ -171,8 +176,10 @@ class M_IRN(object):
             self._kg2_Mrs = tf.Variable(self._init([self._embedding_size, self._embedding_size]), name="_kg2_Mrs")
             self._kg2_Mse = tf.Variable(self._init([self._embedding_size, self._embedding_size]), name="_kg2_Mse")
             # Transfer matrix between two languages
-            self._e_M12 = self._e_M21 = tf.Variable(self._init([self._embedding_size, self._embedding_size]),
-                                                    name="_e_M12")
+            self._e_M12 = tf.Variable(self._orthogonal_init([self._embedding_size, self._embedding_size]),
+                                      name="_e_M12")
+            self._e_M21 = tf.Variable(self._orthogonal_init([self._embedding_size, self._embedding_size]),
+                                      name="_e_M21")
             align_array = self._multi_kb.a_array_test
             keys_tensor = tf.constant(align_array[:, 0])
             vals_tensor = tf.constant(align_array[:, 1])
@@ -286,18 +293,20 @@ class M_IRN(object):
                 head_logits = tf.cond(is_1,
                                       lambda: tf.matmul(head_emb, self._kg1_ent_emb, transpose_b=True),
                                       lambda: tf.matmul(head_emb, self._kg2_ent_emb, transpose_b=True))
-                # Windows compatible
-                head_index = tf.cond(dir_align,
-                                     lambda: tf.cond(is_1,
-                                                     lambda: self._a_table_21.lookup(tf.cast(pre_t_idx, tf.int32)),
-                                                     lambda: self._a_table_12.lookup(tf.cast(pre_t_idx, tf.int32))),
-                                     lambda: tf.cast(tf.argmax(head_logits, 1), tf.int32))
-                # # Linux compatible
-                # head_index = tf.cond(dir_align,
-                #                      lambda: tf.cond(is_1,
-                #                                      lambda: self._a_table_21.lookup(tf.cast(pre_t_idx, tf.int64)),
-                #                                      lambda: self._a_table_12.lookup(tf.cast(pre_t_idx, tf.int64))),
-                #                      lambda: tf.argmax(head_logits, 1))
+                if system() == "Windows":
+                    # Windows compatible
+                    head_index = tf.cond(dir_align,
+                                         lambda: tf.cond(is_1,
+                                                         lambda: self._a_table_21.lookup(tf.cast(pre_t_idx, tf.int32)),
+                                                         lambda: self._a_table_12.lookup(tf.cast(pre_t_idx, tf.int32))),
+                                         lambda: tf.cast(tf.argmax(head_logits, 1), tf.int32))
+                else:
+                    # Linux compatible
+                    head_index = tf.cond(dir_align,
+                                         lambda: tf.cond(is_1,
+                                                         lambda: self._a_table_21.lookup(tf.cast(pre_t_idx, tf.int64)),
+                                                         lambda: self._a_table_12.lookup(tf.cast(pre_t_idx, tf.int64))),
+                                         lambda: tf.argmax(head_logits, 1))
                 path = tf.cond(is_cross,
                                lambda: tf.concat(axis=1, values=[path, tf.reshape(tf.cast(head_index, tf.int32),
                                                                                   [-1, 1])]),

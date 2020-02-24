@@ -19,6 +19,7 @@ flags.DEFINE_integer("a_fold", 3, "number of inner epochs for alignment training
 flags.DEFINE_float("max_grad_norm", 20, "clip gradients to this norm [10]")
 flags.DEFINE_float("alignment_ratio", 1, "Alignment seeds ratio [0.5]")
 flags.DEFINE_float("lr", 0.001, "Learning rate [0.001]")
+flags.DEFINE_float("ar", 2.5, "Learning rate multiplication for AM [2.5]")
 flags.DEFINE_float("epsilon", 1e-8, "Epsilon for Adam Optimizer [1e-8]")
 flags.DEFINE_string("dataset", "EN_en_zh_en", "dataset name")
 flags.DEFINE_string("checkpoint_dir", "checkpoint", "checkpoint directory")
