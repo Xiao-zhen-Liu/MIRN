@@ -3,9 +3,10 @@ from __future__ import print_function
 import os
 import numpy as np
 import tensorflow as tf
+from platform import system
 from sklearn import metrics
 from data_utils import MultiKnowledgeBase
-from utils import add_gradient_noise, zero_nil_slot
+from utils import add_gradient_noise, zero_nil_slot, orthogonal_initializer
 
 
 class M_IRN(object):
@@ -30,7 +31,9 @@ class M_IRN(object):
         self._ent_size_1 = self._multi_kb.kb1.n_entities
         self._ent_size_2 = self._multi_kb.kb2.n_entities
         self._init = tf.contrib.layers.xavier_initializer()
-        self._opt = tf.train.AdamOptimizer(learning_rate=config.lr, epsilon=config.epsilon)
+        self._orthogonal_init = orthogonal_initializer()
+        self._opt = tf.train.AdamOptimizer(learning_rate=config.lr, epsilon=config.epsilon, name="opt")
+        self._AM_opt = tf.train.AdamOptimizer(learning_rate=config.lr*config.ar, epsilon=config.epsilon, name="AM_opt")
         self._name = "M_IRN"
         self._checkpoint_dir = config.checkpoint_dir + '/' + self._name
 
@@ -78,7 +81,7 @@ class M_IRN(object):
         # alignment train and loss
         alignment_batch_loss, ali_res_1_op, ali_res_2_op = self._align()
         alignment_loss_op = tf.reduce_sum(alignment_batch_loss, name="alignment_loss_op")
-        alignment_train_op = self._opt.minimize(alignment_loss_op)
+        alignment_train_op = self._AM_opt.minimize(alignment_loss_op)
 
         # cross entropy as loss for inference:
         batch_loss, inference_path = self._inference()  # (batch_size, 1), (batch_size, 6)
@@ -125,11 +128,11 @@ class M_IRN(object):
     def _build_inputs(self):
         self._kbs_1 = tf.placeholder(tf.int32, [None, 3], name="KBs_1")
         self._kbs_2 = tf.placeholder(tf.int32, [None, 3], name="KBs_2")
+        self._ht_neg_1 = tf.placeholder(tf.int32, [None, 3], name="ht_neg_1")
+        self._ht_neg_2 = tf.placeholder(tf.int32, [None, 3], name="ht_neg_2")
         self._alignments = tf.placeholder(tf.int32, [None, 2], name="alignment_seeds")
         self._queries = tf.placeholder(tf.int32, [None, self._sentence_size], name="queries")
         self._paths = tf.placeholder(tf.int32, [None, self._steps[-1] + 1], name="paths")
-        self._padding_1 = tf.placeholder(tf.int32, [None], name="padding_1")  # for id_padding
-        self._padding_2 = tf.placeholder(tf.int32, [None], name="padding_2")
         self._zeros = tf.placeholder(tf.float32, [None], name="zeros")
         self._isTrain = tf.placeholder(tf.int32, name="ground_truth")
 
@@ -171,8 +174,8 @@ class M_IRN(object):
             self._kg2_Mrs = tf.Variable(self._init([self._embedding_size, self._embedding_size]), name="_kg2_Mrs")
             self._kg2_Mse = tf.Variable(self._init([self._embedding_size, self._embedding_size]), name="_kg2_Mse")
             # Transfer matrix between two languages
-            self._e_M12 = self._e_M21 = tf.Variable(self._init([self._embedding_size, self._embedding_size]),
-                                                    name="_e_M12")
+            self._e_M12 = tf.Variable(self._orthogonal_init([self._embedding_size, self._embedding_size]),name="_e_M12")
+            self._e_M21 = tf.Variable(self._orthogonal_init([self._embedding_size, self._embedding_size]),name="_e_M21")
             align_array = self._multi_kb.a_array_test
             keys_tensor = tf.constant(align_array[:, 0])
             vals_tensor = tf.constant(align_array[:, 1])
@@ -194,15 +197,19 @@ class M_IRN(object):
             heads_1 = self._kbs_1[:, 0]  # (batch) head
             relations_1 = self._kbs_1[:, 1]  # (batch) relation
             tails_1 = self._kbs_1[:, 2]  # (batch) tail
-            tt = self._padding_1
-            kg1_h_matrix = tf.nn.embedding_lookup(self._kg1_ent_emb, heads_1)  # (batch,e)
-            kb1_r_matrix = tf.nn.embedding_lookup(self._kg1_rel_emb, relations_1)
-            kb1_t_matrix = tf.nn.embedding_lookup(self._kg1_ent_emb, tails_1)
-            kg1_tt_matrix = tf.nn.embedding_lookup(self._kg1_ent_emb, tt)
-            kg1_l_matrix = tf.matmul((kg1_h_matrix + kb1_r_matrix), self._kg1_Mse)  # M(h+r)
-            kg1_loss_matrix = (kg1_l_matrix - kb1_t_matrix) * (kg1_l_matrix - kb1_t_matrix)
-            kg1_neg_matrix = (kg1_l_matrix - kg1_tt_matrix) * (kg1_l_matrix - kg1_tt_matrix)
-            kg1_emb_loss = self._margin + tf.reduce_sum(kg1_loss_matrix, 1) - tf.reduce_sum(kg1_neg_matrix, 1)
+            h_neg_1 = self._ht_neg_1[:, 0]
+            t_neg_1 = self._ht_neg_1[:, 2]
+            kg1_h_matrix = tf.nn.l2_normalize(tf.nn.embedding_lookup(self._kg1_ent_emb, heads_1), 1)  # (batch,e)
+            kg1_r_matrix = tf.nn.embedding_lookup(self._kg1_rel_emb, relations_1)
+            kg1_t_matrix = tf.nn.l2_normalize(tf.nn.embedding_lookup(self._kg1_ent_emb, tails_1), 1)
+            kg1_l_matrix = tf.matmul((kg1_h_matrix + kg1_r_matrix), self._kg1_Mse)  # M(h+r)
+            kg1_h_neg = tf.nn.l2_normalize(tf.nn.embedding_lookup(self._kg1_ent_emb, h_neg_1), 1)
+            kg1_t_neg = tf.nn.l2_normalize(tf.nn.embedding_lookup(self._kg1_ent_emb, t_neg_1), 1)
+            kg1_n_matrix = kg1_h_neg + kg1_r_matrix
+            kg1_loss_matrix = (kg1_l_matrix - kg1_t_matrix) * (kg1_l_matrix - kg1_t_matrix)
+            kg1_neg_matrix = (kg1_n_matrix - kg1_t_neg) * (kg1_n_matrix - kg1_t_neg)
+            kg1_emb_loss = self._margin + tf.sqrt(tf.reduce_sum(kg1_loss_matrix, 1)) - tf.sqrt(
+                tf.reduce_sum(kg1_neg_matrix, 1))
             kg1_emb_loss = tf.maximum(0.00, kg1_emb_loss)
 
             return kg1_emb_loss
@@ -213,18 +220,22 @@ class M_IRN(object):
         :return: loss for kg2 embedding
         """
         with tf.variable_scope(self._name):
-            heads_2 = self._kbs_2[:, 0]
-            relations_2 = self._kbs_2[:, 1]
-            tails_2 = self._kbs_2[:, 2]
-            tt = self._padding_2
-            kg2_h_matrix = tf.nn.embedding_lookup(self._kg2_ent_emb, heads_2)  # (batch,e)
+            heads_2 = self._kbs_2[:, 0]  # (batch) head
+            relations_2 = self._kbs_2[:, 1]  # (batch) relation
+            tails_2 = self._kbs_2[:, 2]  # (batch) tail
+            h_neg_2 = self._ht_neg_2[:, 0]
+            t_neg_2 = self._ht_neg_2[:, 2]
+            kg2_h_matrix = tf.nn.l2_normalize(tf.nn.embedding_lookup(self._kg2_ent_emb, heads_2), 1)  # (batch,e)
             kg2_r_matrix = tf.nn.embedding_lookup(self._kg2_rel_emb, relations_2)
-            kg2_t_matrix = tf.nn.embedding_lookup(self._kg2_ent_emb, tails_2)
-            kg2_tt_matrix = tf.nn.embedding_lookup(self._kg2_ent_emb, tt)
+            kg2_t_matrix = tf.nn.l2_normalize(tf.nn.embedding_lookup(self._kg2_ent_emb, tails_2), 1)
             kg2_l_matrix = tf.matmul((kg2_h_matrix + kg2_r_matrix), self._kg2_Mse)  # M(h+r)
+            kg2_h_neg = tf.nn.l2_normalize(tf.nn.embedding_lookup(self._kg2_ent_emb, h_neg_2), 1)
+            kg2_t_neg = tf.nn.l2_normalize(tf.nn.embedding_lookup(self._kg2_ent_emb, t_neg_2), 1)
+            kg2_n_matrix = kg2_h_neg + kg2_r_matrix
             kg2_loss_matrix = (kg2_l_matrix - kg2_t_matrix) * (kg2_l_matrix - kg2_t_matrix)
-            kg2_neg_matrix = (kg2_l_matrix - kg2_tt_matrix) * (kg2_l_matrix - kg2_tt_matrix)
-            kg2_emb_loss = self._margin + tf.reduce_sum(kg2_loss_matrix, 1) - tf.reduce_sum(kg2_neg_matrix, 1)
+            kg2_neg_matrix = (kg2_n_matrix - kg2_t_neg) * (kg2_n_matrix - kg2_t_neg)
+            kg2_emb_loss = self._margin + tf.sqrt(tf.reduce_sum(kg2_loss_matrix, 1)) - tf.sqrt(
+                tf.reduce_sum(kg2_neg_matrix, 1))
             kg2_emb_loss = tf.maximum(0.00, kg2_emb_loss)
 
             return kg2_emb_loss
@@ -240,7 +251,7 @@ class M_IRN(object):
                                                 transpose_b=True), 1)
             kg1_ent_preds = tf.argmax(tf.matmul(tf.matmul(kg2_entity_emb,
                                                           self._e_M21 if self._is_dual_matrices else
-                                                          tf.matrix_inverse(self._e_M12)), self._kg1_ent_emb,
+                                                          tf.linalg.inv(self._e_M12)), self._kg1_ent_emb,
                                                 transpose_b=True), 1)
             alignment_loss_matrix = tf.subtract(tf.matmul(kg1_entity_emb, self._e_M12), kg2_entity_emb)
             alignment_loss = tf.reduce_sum(tf.sqrt(tf.reduce_sum(tf.square(alignment_loss_matrix), 1)))
@@ -264,7 +275,7 @@ class M_IRN(object):
             state_emb = tf.nn.embedding_lookup(self._kg1_ent_emb, init_state_index)  # (b,1)->(b,1,e)
             state_emb = tf.squeeze(state_emb, [1])  # (batch_size, embedding_size)
             dir_align = tf.constant(self._is_direct_align, dtype=tf.bool)
-            e_M21 = tf.matrix_inverse(self._e_M12)
+            e_M21 = tf.linalg.inv(self._e_M12)
             # Reasoning module
             path = pre_t_idx = init_state_index
             for hop in range(self._hops):
@@ -286,18 +297,21 @@ class M_IRN(object):
                 head_logits = tf.cond(is_1,
                                       lambda: tf.matmul(head_emb, self._kg1_ent_emb, transpose_b=True),
                                       lambda: tf.matmul(head_emb, self._kg2_ent_emb, transpose_b=True))
-                # Windows compatible
-                head_index = tf.cond(dir_align,
-                                     lambda: tf.cond(is_1,
-                                                     lambda: self._a_table_21.lookup(tf.cast(pre_t_idx, tf.int32)),
-                                                     lambda: self._a_table_12.lookup(tf.cast(pre_t_idx, tf.int32))),
-                                     lambda: tf.cast(tf.argmax(head_logits, 1), tf.int32))
-                # # Linux compatible
-                # head_index = tf.cond(dir_align,
-                #                      lambda: tf.cond(is_1,
-                #                                      lambda: self._a_table_21.lookup(tf.cast(pre_t_idx, tf.int64)),
-                #                                      lambda: self._a_table_12.lookup(tf.cast(pre_t_idx, tf.int64))),
-                #                      lambda: tf.argmax(head_logits, 1))
+
+                if system() == "Windows":
+                    # Windows compatible
+                    head_index = tf.cond(dir_align,
+                                         lambda: tf.cond(is_1,
+                                                         lambda: self._a_table_21.lookup(tf.cast(pre_t_idx, tf.int32)),
+                                                         lambda: self._a_table_12.lookup(tf.cast(pre_t_idx, tf.int32))),
+                                         lambda: tf.cast(tf.argmax(head_logits, 1), tf.int32))
+                else:
+                    # Linux compatible
+                    head_index = tf.cond(dir_align,
+                                         lambda: tf.cond(is_1,
+                                                         lambda: self._a_table_21.lookup(tf.cast(pre_t_idx, tf.int64)),
+                                                         lambda: self._a_table_12.lookup(tf.cast(pre_t_idx, tf.int64))),
+                                         lambda: tf.argmax(head_logits, 1))
                 path = tf.cond(is_cross,
                                lambda: tf.concat(axis=1, values=[path, tf.reshape(tf.cast(head_index, tf.int32),
                                                                                   [-1, 1])]),
@@ -374,7 +388,7 @@ class M_IRN(object):
                 pre_t_idx = tail_index
             return loss, path
 
-    def batch_train_kg1_embedding(self, batch_kb1):
+    def batch_train_kg1_embedding(self, batch_kb1, batch_neg1):
         """
         Args:
             batch_kb1: Tensor (None, memory_size_1, 3)
@@ -382,17 +396,15 @@ class M_IRN(object):
         Returns:
             loss: floating-point number, the loss computed for the batch
         """
-        kg1_n_example = batch_kb1.shape[0]
-        pad_1 = np.random.randint(low=0, high=self._ent_size_1, size=kg1_n_example)
 
-        feed_dict = {self._kbs_1: batch_kb1, self._padding_1: pad_1, self._isTrain: 0}
+        feed_dict = {self._kbs_1: batch_kb1, self._ht_neg_1: batch_neg1 , self._isTrain: 0}
 
         kg1_loss, _1 = self._sess.run([self.kg1_loss_op, self.kg1_train_op], feed_dict=feed_dict)
         # self._kg1_ent_emb = tf.nn.l2_normalize(self._kg1_ent_emb,1)
         # self._kg1_rel_emb = tf.nn.l2_normalize(self._kg1_rel_emb,1)
         return kg1_loss
 
-    def batch_train_kg2_embedding(self, batch_kb2):
+    def batch_train_kg2_embedding(self, batch_kb2, batch_neg2):
         """
         Args:
             batch_kb2: Tensor (None, memory_size_1, 3)
@@ -400,10 +412,8 @@ class M_IRN(object):
         Returns:
             loss: floating-point number, the loss computed for the batch
         """
-        kg2_n_example = batch_kb2.shape[0]
-        pad_2 = np.random.randint(low=0, high=self._ent_size_2, size=kg2_n_example)
 
-        feed_dict = {self._kbs_2: batch_kb2, self._padding_2: pad_2, self._isTrain: 0}
+        feed_dict = {self._kbs_2: batch_kb2, self._ht_neg_2: batch_neg2, self._isTrain: 0}
 
         kg2_loss, _2 = self._sess.run([self.kg2_loss_op, self.kg2_train_op], feed_dict=feed_dict)
         return kg2_loss

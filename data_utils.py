@@ -8,9 +8,8 @@ Note that the last item of each line should be an entity.
 """
 from __future__ import absolute_import
 
-import os
+import os, time, jieba
 import numpy as np
-import jieba
 
 
 def read_knowledge_base_file(knowledge_base_file, separator="@@@"):
@@ -53,6 +52,7 @@ head entity and relation pair, maximum tail number.
 	n_relations = len(rel2id)
 	# tails = np.zeros([n_entities * n_relations, 1], 'int32')
 	triples = []
+	triples_record = set([])
 
 	with open(knowledge_base_file, encoding="utf-8") as f:
 		for line in f.readlines():
@@ -62,9 +62,10 @@ head entity and relation pair, maximum tail number.
 			r = rel2id[line[1]]
 			t = ent2id[line[2]]
 			triples.append([h, r, t])  # [h,r]->[h*n_relations+r]
+			triples_record.add((h, r, t))
 			# tails[h * n_relations + r] += 1
 
-	return np.array(triples) #, np.max(tails)
+	return np.array(triples), triples_record #, np.max(tails)
 
 
 def read_dataset(data_file: str, data_sep = "\t"):
@@ -122,15 +123,57 @@ class KnowledgeBase(object):
 		self.id2ent[-1] = '<unk>'
 		self.n_entities = len(self.ent2id)
 		self.n_relations = len(self.rel2id)
+		self.hpt = np.array([0])
+		self.tph = np.array([0])
 
 		print('here are %d relations in rel2id(relation_vocabulary)' % self.n_relations)
 		print('here are %d entities in ent2id(entity_vocabulary)' % self.n_entities)
 
 		# self.triples, self.tails_size = get_knowledge_base(knowledge_base_file, self.ent2id, self.rel2id)
 
-		self.triples = get_knowledge_base(knowledge_base_file, self.ent2id, self.rel2id)
+		self.triples, self.triples_record = get_knowledge_base(knowledge_base_file, self.ent2id, self.rel2id)
 
 		print("#number of Triples", len(self.triples))
+		tph_array = np.zeros((self.n_relations, self.n_entities))
+		hpt_array = np.zeros((self.n_relations, self.n_entities))
+		for h, r, t in self.triples:
+			tph_array[r][h] += 1.
+			hpt_array[r][t] += 1.
+		self.tph = np.mean(tph_array, axis=1)
+		self.hpt = np.mean(hpt_array, axis=1)
+
+	def corrupt_pos(self, t, pos):
+		hit = True
+		res = None
+		while hit:
+			res = np.copy(t)
+			samp = np.random.randint(self.n_entities)
+			while samp == t[pos]:
+				samp = np.random.randint(self.n_entities)
+			res[pos] = samp
+			if tuple(res) not in self.triples_record:
+				hit = False
+		return res
+
+	# bernoulli negative sampling
+	def corrupt(self, t, tar=None):
+		if tar == 't':
+			return self.corrupt_pos(t, 2)
+		elif tar == 'h':
+			return self.corrupt_pos(t, 0)
+		else:
+			this_tph = self.tph[t[1]]
+			this_hpt = self.hpt[t[1]]
+			assert (this_tph > 0 and this_hpt > 0)
+			np.random.seed(int(time.time()))
+			if np.random.uniform(high=this_tph + this_hpt, low=0.) < this_hpt:
+				return self.corrupt_pos(t, 2)
+			else:
+				return self.corrupt_pos(t, 0)
+
+	# bernoulli negative sampling on a batch
+	def corrupt_batch(self, t_batch, tar=None):
+		return np.array([self.corrupt(t, tar) for t in t_batch])
 
 
 class MultiKnowledgeBase(object):

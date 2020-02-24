@@ -19,6 +19,7 @@ flags.DEFINE_integer("a_fold", 3, "number of inner epochs for alignment training
 flags.DEFINE_float("max_grad_norm", 20, "clip gradients to this norm [10]")
 flags.DEFINE_float("alignment_ratio", 1, "Alignment seeds ratio [0.5]")
 flags.DEFINE_float("lr", 0.001, "Learning rate [0.001]")
+flags.DEFINE_float("ar", 2.5, "Learning rate multiplication for AM [2.5]")
 flags.DEFINE_float("epsilon", 1e-8, "Epsilon for Adam Optimizer [1e-8]")
 flags.DEFINE_string("dataset", "EN_en_zh_en", "dataset name")
 flags.DEFINE_string("checkpoint_dir", "checkpoint", "checkpoint directory")
@@ -128,10 +129,12 @@ def main(_):
 				kg1_embedding_total_cost = 0.0
 				kg2_embedding_total_cost = 0.0
 				for s, e in kg1_embedding_batches:
-					kg1_embedding_total_cost += model.batch_train_kg1_embedding(kb1_triples[s:e])
+					kg1_embedding_total_cost += model.batch_train_kg1_embedding(kb1_triples[s:e],
+					                                                            kb1.corrupt_batch(kb1_triples[s:e]))
 				kg1_embedding_cost = kg1_embedding_total_cost
 				for s, e in kg2_embedding_batches:
-					kg2_embedding_total_cost += model.batch_train_kg2_embedding(kb2_triples[s:e])
+					kg2_embedding_total_cost += model.batch_train_kg2_embedding(kb2_triples[s:e],
+					                                                            kb2.corrupt_batch(kb2_triples[s:e]))
 				kg2_embedding_cost = kg2_embedding_total_cost
 				for j in range(FLAGS.a_fold):
 					np.random.shuffle(align_tr_batches)
@@ -182,10 +185,12 @@ def main(_):
 				kg1_embedding_total_cost = 0.0
 				kg2_embedding_total_cost = 0.0
 				for s, e in kg1_embedding_batches:
-					kg1_embedding_total_cost += model.batch_train_kg1_embedding(kb1_triples[s:e])
+					kg1_embedding_total_cost += model.batch_train_kg1_embedding(kb1_triples[s:e],
+					                                                            kb1.corrupt_batch(kb1_triples[s:e]))
 				kg1_embedding_cost = kg1_embedding_total_cost
 				for s, e in kg2_embedding_batches:
-					kg2_embedding_total_cost += model.batch_train_kg2_embedding(kb2_triples[s:e])
+					kg2_embedding_total_cost += model.batch_train_kg2_embedding(kb2_triples[s:e],
+					                                                            kb2.corrupt_batch(kb2_triples[s:e]))
 				kg2_embedding_cost = kg2_embedding_total_cost
 			for j in range(FLAGS.a_fold):
 				np.random.shuffle(align_tr_batches)
