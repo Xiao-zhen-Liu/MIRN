@@ -223,6 +223,8 @@ def process_dataset(data_file, multi_kb: MultiKnowledgeBase, data_sep="\t", path
 					p_ids.extend([kb1_ent2id[cur_tp[0]], kb1_rel2id[cur_tp[1]], kb1_ent2id[cur_tp[2]]])
 				else:
 					p_ids.extend([kb2_ent2id[cur_tp[0]], kb2_rel2id[cur_tp[1]], kb2_ent2id[cur_tp[2]]])
+		# to prevent exceeding array indices in the reasoning module (because tf.cond doesn't use short-circuit code.)
+		p_ids.append(0)
 		paths_ids.append(p_ids)
 	return np.array(questions_ids), np.array(paths_ids), questions_strings, paths_strings, qw2id, sentence_size,\
 	       len(qw2id), hops, lan_que, lan_labels, steps

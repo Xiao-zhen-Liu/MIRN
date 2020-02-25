@@ -132,7 +132,7 @@ class M_IRN(object):
         self._kbs_2 = tf.placeholder(tf.int32, [None, 3], name="KBs_2")
         self._alignments = tf.placeholder(tf.int32, [None, 2], name="alignment_seeds")
         self._queries = tf.placeholder(tf.int32, [None, self._sentence_size], name="queries")
-        self._paths = tf.placeholder(tf.int32, [None, self._steps[-1] + 1], name="paths")
+        self._paths = tf.placeholder(tf.int32, [None, self._steps[-1] + 2], name="paths")
         self._padding_1 = tf.placeholder(tf.int32, [None], name="padding_1")  # for id_padding
         self._padding_2 = tf.placeholder(tf.int32, [None], name="padding_2")
         self._zeros = tf.placeholder(tf.float32, [None], name="zeros")
@@ -359,12 +359,12 @@ class M_IRN(object):
                                       lambda: tf.matmul(tf.matmul(state_emb, self._kg2_Mse),
                                                         self._kg2_ent_emb, transpose_b=True))
                 tail_index = tf.argmax(tail_logits, 1)
-                # (batch_size, embedding_size)
-                tail_index = tf.cast(tail_index, tf.float32)
-                relation_index = tf.cast(relation_index, tf.float32)
-                # if relation_index == 0, stop inference, tail_index = previous tail; if not, tail won't change
-                tail_index = relation_index / (relation_index + 1e-15) * tail_index \
-                             + (1 - relation_index / (relation_index + 1e-15)) * tf.cast(path[:, -1], tf.float32)
+                # # (batch_size, embedding_size)
+                # tail_index = tf.cast(tail_index, tf.float32)
+                # relation_index = tf.cast(relation_index, tf.float32)
+                # # if relation_index == 0, stop inference, tail_index = previous tail; if not, tail won't change
+                # tail_index = relation_index / (relation_index + 1e-15) * tail_index \
+                #              + (1 - relation_index / (relation_index + 1e-15)) * tf.cast(path[:, -1], tf.float32)
                 path = tf.concat(axis=1, values=[path, tf.reshape(tf.cast(relation_index, tf.int32), [-1, 1])])
                 path = tf.concat(axis=1, values=[path, tf.reshape(tf.cast(tail_index, tf.int32), [-1, 1])])
                 # (b,self._rel_size_1)
