@@ -15,6 +15,7 @@ flags.DEFINE_integer("batch_size", 50, "batch size to use during training [50]")
 flags.DEFINE_float("max_grad_norm", 10, "clip gradients to this norm [10]")
 flags.DEFINE_float("alignment_ratio", 1, "Alignment seeds ratio [0.5]")
 flags.DEFINE_float("lr", 0.001, "Learning rate [0.001]")
+flags.DEFINE_float("ar", 2.5, "Learning rate multiplication for AM [2.5]")
 flags.DEFINE_float("epsilon", 1e-8, "Epsilon for Adam Optimizer [1e-8]")
 flags.DEFINE_string("dataset", "EN_en_zh_en", "dataset name")
 flags.DEFINE_string("checkpoint_dir", "checkpoint", "checkpoint directory")
@@ -87,7 +88,7 @@ def main(_):
         model.load()
         t_preds = model.predict(test_q, test_p, t_batches)
         t_accu, t_al = multi_accuracy(test_p, t_preds, multi_kb, FLAGS.steps, FLAGS.hops, FLAGS.lan_labels)
-        align_accu_1_2, align_accu_2_1 = model.align_res(a_tests, align_t_batches)
+        align_accu_1_2, align_accu_2_1 = model.align_res(a_tests)
         recov_name = data_file.strip(".txt") + "_predictions.txt"
 
         print('-----------------------')

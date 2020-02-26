@@ -2,12 +2,10 @@
 from __future__ import print_function
 import os
 from platform import system
-
 import numpy as np
 import tensorflow as tf
-from sklearn import metrics
 from data_utils import MultiKnowledgeBase
-from utils import add_gradient_noise, zero_nil_slot, orthogonal_initializer
+from utils import add_gradient_noise, zero_nil_slot, orthogonal_initializer, parallel_predict
 
 
 class M_IRN(object):
@@ -81,9 +79,11 @@ class M_IRN(object):
         kg2_train_op = self._opt.apply_gradients(kg2_grads_and_vars, name="kg2_train_op")
 
         # alignment train and loss
-        alignment_batch_loss, ali_res_1_op, ali_res_2_op = self._align()
+        alignment_batch_loss = self._align_train()
         alignment_loss_op = tf.reduce_sum(alignment_batch_loss, name="alignment_loss_op")
         alignment_train_op = self._AM_opt.minimize(alignment_loss_op)
+
+        a_12_vec_op, a_21_vec_op = self._aligned_vecs()
 
         # cross entropy as loss for inference:
         batch_loss, inference_path = self._inference()  # (batch_size, 1), (batch_size, 6)
@@ -118,8 +118,8 @@ class M_IRN(object):
         self.inference_loss_op = inference_loss_op
         self.inference_predict_op = inference_predict_op
         self.inference_train_op = inference_train_op
-        self.ali_res_1 = ali_res_1_op
-        self.ali_res_2 = ali_res_2_op
+        self.ali_res_1 = a_12_vec_op
+        self.ali_res_2 = a_21_vec_op
 
         init_op = tf.global_variables_initializer()
         table_op = tf.tables_initializer()
@@ -236,25 +236,38 @@ class M_IRN(object):
 
             return kg2_emb_loss
 
-    def _align(self):
+    def _align_train(self):
         with tf.variable_scope(self._name):
             kg1_entity_ids = self._alignments[:, 0]
-            kg1_entity_emb = tf.nn.l2_normalize(tf.nn.embedding_lookup(self._kg1_ent_emb, kg1_entity_ids),1)
+            kg1_entity_emb = tf.nn.l2_normalize(tf.nn.embedding_lookup(self._kg1_ent_emb, kg1_entity_ids), 1)
             kg2_entity_ids = self._alignments[:, 1]
-            kg2_entity_emb = tf.nn.l2_normalize(tf.nn.embedding_lookup(self._kg2_ent_emb, kg2_entity_ids),1)
+            kg2_entity_emb = tf.nn.l2_normalize(tf.nn.embedding_lookup(self._kg2_ent_emb, kg2_entity_ids), 1)
 
-            kg2_ent_preds = tf.argmax(tf.matmul(tf.matmul(kg1_entity_emb, self._e_M12), self._kg2_ent_emb,
-                                                transpose_b=True), 1)
-            kg1_ent_preds = tf.argmax(tf.matmul(tf.matmul(kg2_entity_emb,
-                                                          self._e_M21 if self._is_dual_matrices else
-                                                          tf.matrix_inverse(self._e_M12)), self._kg1_ent_emb,
-                                                transpose_b=True), 1)
+            # kg2_ent_preds = tf.argmax(tf.matmul(tf.matmul(kg1_entity_emb, self._e_M12), self._kg2_ent_emb,
+            #                                     transpose_b=True), 1)
+            # kg1_ent_preds = tf.argmax(tf.matmul(tf.matmul(kg2_entity_emb,
+            #                                               self._e_M21 if self._is_dual_matrices else
+            #                                               tf.matrix_inverse(self._e_M12)), self._kg1_ent_emb,
+            #                                     transpose_b=True), 1)
             alignment_loss_matrix = tf.subtract(tf.matmul(kg1_entity_emb, self._e_M12), kg2_entity_emb)
             alignment_loss = tf.reduce_sum(tf.sqrt(tf.reduce_sum(tf.square(alignment_loss_matrix), 1)))
             if self._is_dual_matrices:
                 alignment_loss_matrix = tf.subtract(tf.matmul(kg2_entity_emb, self._e_M21), kg1_entity_emb)
                 alignment_loss += tf.reduce_sum(tf.sqrt(tf.reduce_sum(tf.square(alignment_loss_matrix), 1)))
-            return alignment_loss, kg1_ent_preds, kg2_ent_preds
+            return alignment_loss
+
+    def _aligned_vecs(self):
+        with tf.variable_scope(self._name):
+            kg1_ent_ids = self._alignments[:, 0]
+            # [test_size, emb_size]
+            kg1_ent_embs = tf.nn.l2_normalize(tf.nn.embedding_lookup(self._kg1_ent_emb, kg1_ent_ids), 1)
+            kg2_ent_ids = self._alignments[:, 1]
+            kg2_ent_embs = tf.nn.l2_normalize(tf.nn.embedding_lookup(self._kg2_ent_emb, kg2_ent_ids), 1)
+            # transferred embeddings
+            trans_1_2 = tf.matmul(kg1_ent_embs, self._e_M12)
+            trans_2_1 = tf.matmul(kg2_ent_embs, self._e_M21 if self._is_dual_matrices else tf.linalg.inv(self._e_M12))
+
+            return trans_1_2, trans_2_1
 
     def _inference(self):
         with tf.variable_scope(self._name):
@@ -465,14 +478,17 @@ class M_IRN(object):
             res.extend(self.batch_predict(quires[s:e], path[s:e]))
         return np.array(res)
 
-    def align_res(self, alignments, batches):
-        aligned_1 = []
-        aligned_2 = []
-        for s, e in batches:
-            a1, a2 = self._sess.run([self.ali_res_1, self.ali_res_2], feed_dict={self._alignments: alignments[s:e]})
-            aligned_1.extend(a1)
-            aligned_2.extend(a2)
-        return metrics.accuracy_score(alignments[:, 1], aligned_2), metrics.accuracy_score(alignments[:, 0], aligned_1)
+    def align_res(self, alignments):
+        # aligned_1 = []
+        # aligned_2 = []
+        # for s, e in batches:
+        #     a1, a2 = self._sess.run([self.ali_res_1, self.ali_res_2], feed_dict={self._alignments: alignments[s:e]})
+        #     aligned_1.extend(a1)
+        #     aligned_2.extend(a2)
+        a_12_vecs, a_21_vecs, e_emb_1, e_emb_2 = \
+            self._sess.run([self.ali_res_1, self.ali_res_2, self._kg1_e_norm, self._kg2_e_norm],
+                           feed_dict={self._alignments: alignments, })
+        return parallel_predict(a_12_vecs, a_21_vecs, e_emb_1, e_emb_2, alignments)
 
     def store(self):
         # attr = "direct_align" if self._is_direct_align else "MTransE"

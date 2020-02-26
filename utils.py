@@ -1,8 +1,12 @@
 # coding: utf-8
+import sys, multiprocessing, time
+from numpy import linalg as LA
+import heapq as HP
 import numpy as np
 import tensorflow as tf
 from sklearn import metrics
 from data_utils import MultiKnowledgeBase
+from multiprocessing import Process, Value, Lock, Manager
 
 
 def norm(matrix):
@@ -151,3 +155,60 @@ def orthogonal_initializer(scale=1.0, dtype=tf.float32):
   def _initializer(shape, dtype=tf.float32, partition_info=None):
     return tf.constant(orthogonal(shape) * scale, dtype)
   return _initializer
+
+
+def NN(vec, vec_pool):
+    min_dist = sys.maxsize
+    rst = None
+    for i in range(len(vec_pool)):
+        dist = LA.norm(vec - vec_pool[i], ord=1)
+        if dist < min_dist:
+            min_dist = dist
+            rst = i
+    return rst
+
+
+def kNN(vec, vec_pool, topk=10):
+    q = []
+    for i in range(len(vec_pool)):
+        dist = LA.norm(vec - vec_pool[i], ord=1)
+        if len(q) < topk:
+            HP.heappush(q, self.index_dist(i, dist))
+        else:
+            #indeed it fetches the biggest
+            tmp = HP.nsmallest(1, q)[0]
+            if tmp.dist > dist:
+                HP.heapreplace(q, self.index_dist(i, dist) )
+    rst = []
+    while len(q) > 0:
+        item = HP.heappop(q)
+        rst.insert(0, (item.index, item.dist))
+    return rst
+
+def align_predict(a_12_vecs, a_21_vecs, e_emb_1, e_emb_2, alignments, index, a_12_ids, a_21_ids, t0):
+    while index.value < len(alignments):
+        id = index.value
+        index.value += 1
+        if id % 100 == 0:
+            print("Tested %d in %d seconds." % (id, time.time()-t0))
+            print(metrics.accuracy_score(alignments[:id, 1], a_12_ids[:id]),
+                  metrics.accuracy_score(alignments[:id, 0], a_21_ids[:id]))
+
+        a_12_ids.append(NN(a_12_vecs[id], e_emb_2))
+        a_21_ids.append(NN(a_21_vecs[id], e_emb_1))
+
+def parallel_predict(a_12_vecs, a_21_vecs, e_emb_1, e_emb_2, alignments):
+    manager = Manager()
+    index = Value('i', 0, lock=True)  # index
+    a_12_ids = manager.list()
+    a_21_ids = manager.list()
+    t0 = time.time()
+    cpu_count = multiprocessing.cpu_count()
+    processes = [Process(target=align_predict(a_12_vecs, a_21_vecs, e_emb_1, e_emb_2, alignments, index, a_12_ids,
+                                              a_21_ids, t0)) for x in range(cpu_count - 1)]
+    for p in processes:
+        p.start()
+    for p in processes:
+        p.join()
+
+    return metrics.accuracy_score(alignments[:, 1], a_12_ids), metrics.accuracy_score(alignments[:, 0], a_21_ids)
