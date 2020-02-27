@@ -81,9 +81,10 @@ class M_IRN(object):
         kg2_train_op = self._opt.apply_gradients(kg2_grads_and_vars, name="kg2_train_op")
 
         # alignment train and loss
-        alignment_batch_loss, ali_res_1_op, ali_res_2_op = self._align()
+        alignment_batch_loss = self._align_to_train()
         alignment_loss_op = tf.reduce_sum(alignment_batch_loss, name="alignment_loss_op")
         alignment_train_op = self._AM_opt.minimize(alignment_loss_op)
+        ali_res_1_op, ali_res_2_op = self._align_kNN()
 
         # cross entropy as loss for inference:
         batch_loss, inference_path = self._inference()  # (batch_size, 1), (batch_size, 6)
@@ -137,6 +138,7 @@ class M_IRN(object):
         self._padding_2 = tf.placeholder(tf.int32, [None], name="padding_2")
         self._zeros = tf.placeholder(tf.float32, [None], name="zeros")
         self._isTrain = tf.placeholder(tf.int32, name="ground_truth")
+        self._topK = tf.placeholder(tf.int32, name="topK")
 
     def _build_vars(self):
         with tf.variable_scope(self._name):
@@ -236,25 +238,33 @@ class M_IRN(object):
 
             return kg2_emb_loss
 
-    def _align(self):
+    def _align_to_train(self):
         with tf.variable_scope(self._name):
             kg1_entity_ids = self._alignments[:, 0]
             kg1_entity_emb = tf.nn.l2_normalize(tf.nn.embedding_lookup(self._kg1_ent_emb, kg1_entity_ids),1)
             kg2_entity_ids = self._alignments[:, 1]
             kg2_entity_emb = tf.nn.l2_normalize(tf.nn.embedding_lookup(self._kg2_ent_emb, kg2_entity_ids),1)
-
-            kg2_ent_preds = tf.argmax(tf.matmul(tf.matmul(kg1_entity_emb, self._e_M12), self._kg2_ent_emb,
-                                                transpose_b=True), 1)
-            kg1_ent_preds = tf.argmax(tf.matmul(tf.matmul(kg2_entity_emb,
-                                                          self._e_M21 if self._is_dual_matrices else
-                                                          tf.matrix_inverse(self._e_M12)), self._kg1_ent_emb,
-                                                transpose_b=True), 1)
             alignment_loss_matrix = tf.subtract(tf.matmul(kg1_entity_emb, self._e_M12), kg2_entity_emb)
             alignment_loss = tf.reduce_sum(tf.sqrt(tf.reduce_sum(tf.square(alignment_loss_matrix), 1)))
             if self._is_dual_matrices:
                 alignment_loss_matrix = tf.subtract(tf.matmul(kg2_entity_emb, self._e_M21), kg1_entity_emb)
                 alignment_loss += tf.reduce_sum(tf.sqrt(tf.reduce_sum(tf.square(alignment_loss_matrix), 1)))
-            return alignment_loss, kg1_ent_preds, kg2_ent_preds
+            return alignment_loss
+
+    def _align_kNN(self):
+        with tf.variable_scope(self._name):
+            kg1_entity_ids = self._alignments[:, 0]
+            kg1_entity_emb = tf.nn.l2_normalize(tf.nn.embedding_lookup(self._kg1_ent_emb, kg1_entity_ids), 1)
+            kg2_entity_ids = self._alignments[:, 1]
+            kg2_entity_emb = tf.nn.l2_normalize(tf.nn.embedding_lookup(self._kg2_ent_emb, kg2_entity_ids), 1)
+
+            _, kg2_ent_preds = tf.nn.top_k(tf.matmul(tf.matmul(kg1_entity_emb, self._e_M12), self._kg2_ent_emb,
+                                                     transpose_b=True), k=self._topK)
+            _, kg1_ent_preds = tf.nn.top_k(tf.matmul(tf.matmul(kg2_entity_emb,
+                                                               self._e_M21 if self._is_dual_matrices else
+                                                               tf.matrix_inverse(self._e_M12)), self._kg1_ent_emb,
+                                                     transpose_b=True), k=self._topK)
+            return kg1_ent_preds, kg2_ent_preds
 
     def _inference(self):
         with tf.variable_scope(self._name):
@@ -465,14 +475,25 @@ class M_IRN(object):
             res.extend(self.batch_predict(quires[s:e], path[s:e]))
         return np.array(res)
 
-    def align_res(self, alignments, batches):
+    def align_res(self, alignments, batches, topK):
         aligned_1 = []
         aligned_2 = []
         for s, e in batches:
-            a1, a2 = self._sess.run([self.ali_res_1, self.ali_res_2], feed_dict={self._alignments: alignments[s:e]})
+            a1, a2 = self._sess.run([self.ali_res_1, self.ali_res_2], feed_dict={self._alignments: alignments[s:e],
+                                                                                 self._topK: topK})
             aligned_1.extend(a1)
             aligned_2.extend(a2)
-        return metrics.accuracy_score(alignments[:, 1], aligned_2), metrics.accuracy_score(alignments[:, 0], aligned_1)
+
+        hits20_12 = 0
+        hits20_21 = 0
+        for i in range(len(alignments)):
+            if alignments[i, 1] in aligned_2[i]:
+                hits20_12 += 1
+            if alignments[i, 0] in aligned_1[i]:
+                hits20_21 += 1
+        hits20_12 = hits20_12/float(len(alignments))
+        hits20_21 = hits20_21/float(len(alignments))
+        return hits20_12, hits20_21
 
     def store(self):
         # attr = "direct_align" if self._is_direct_align else "MTransE"
