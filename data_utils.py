@@ -1,8 +1,6 @@
 # coding: utf-8
 """Process input data.
-
 Knowledge Base: h@@@r@@@t
-
 Training/Testing data: question@@@answer@@@e1(l1)#r1(l1)#e2(l1)#e2(l2)#r2(l2)#e3(l2)
 Note that the last item of each line should be an entity.
 """

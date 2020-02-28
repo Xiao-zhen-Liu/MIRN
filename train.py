@@ -15,7 +15,7 @@ flags.DEFINE_integer("embedding_dimension", 64, "KG vector dimension [64]")
 flags.DEFINE_integer("batch_size", 50, "batch size to use during training [50]")
 flags.DEFINE_integer("r_epoch", 2000, "number of epochs to use during training [2000]")
 flags.DEFINE_integer("e_epoch", 10, "number of middle epochs for embedding training [10]")
-flags.DEFINE_integer("a_fold", 3, "number of inner epochs for alignment training [3]")
+flags.DEFINE_integer("a_fold", 5, "number of inner epochs for alignment training [3]")
 flags.DEFINE_float("max_grad_norm", 20, "clip gradients to this norm [10]")
 flags.DEFINE_float("alignment_ratio", 1, "Alignment seeds ratio [0.5]")
 flags.DEFINE_float("lr", 0.001, "Learning rate [0.001]")
@@ -118,9 +118,15 @@ def main(_):
 			kg1_embedding_cost = 0.0
 			kg2_embedding_cost = 0.0
 			alignment_cost = 0.0
-			best_1_2 = 0.0
-			best_2_1 = 0.0
-			best_1_2_epoch = best_2_1_epoch = 0
+			best_1_2_top1 = 0.0
+			best_2_1_top1 = 0.0
+			best_1_2_top10 = 0.0
+			best_2_1_top10 = 0.0
+			best_1_2_top100 = 0.0
+			best_2_1_top100 = 0.0
+			best_1_2_epoch_top1 = best_2_1_epoch_top1 = 0
+			best_1_2_epoch_top10 = best_2_1_epoch_top10 = 0
+			best_1_2_epoch_top100 = best_2_1_epoch_top100 = 0
 			for i in range(1, 400 + 1):
 				start = time.time()
 				print("MIRN KG epoch {} training...".format(i))
@@ -142,15 +148,33 @@ def main(_):
 					for s, e in align_tr_batches:
 						alignment_total_cost += model.batch_train_alignment(a_seeds[s:e])
 					alignment_cost = alignment_total_cost
-				align_accu_1_2, align_accu_2_1 = model.align_res(a_tests, align_t_batches)
+				align_accu_1_2_top1, align_accu_2_1_top1 = model.align_res(a_tests, align_t_batches, 1)
+				align_accu_1_2_top10, align_accu_2_1_top10 = model.align_res(a_tests, align_t_batches, 10)
+				align_accu_1_2_top100, align_accu_2_1_top100 = model.align_res(a_tests, align_t_batches, 100)
 
-				if align_accu_1_2 > best_1_2:
-					best_1_2_epoch = i
-					best_1_2 = align_accu_1_2
+				if align_accu_1_2_top1 > best_1_2_top1:
+					best_1_2_epoch_top1 = i
+					best_1_2_top1 = align_accu_1_2_top1
 
-				if align_accu_2_1 > best_2_1:
-					best_2_1_epoch = i
-					best_2_1 = align_accu_2_1
+				if align_accu_2_1_top1 > best_2_1_top1:
+					best_2_1_epoch_top1 = i
+					best_2_1_top1 = align_accu_2_1_top1
+
+				if align_accu_1_2_top10 > best_1_2_top10:
+					best_1_2_epoch_top10 = i
+					best_1_2_top10 = align_accu_1_2_top10
+
+				if align_accu_2_1_top10 > best_2_1_top10:
+					best_2_1_epoch_top10 = i
+					best_2_1_top10 = align_accu_2_1_top10
+
+				if align_accu_1_2_top100 > best_1_2_top100:
+					best_1_2_epoch_top100 = i
+					best_1_2_top100 = align_accu_1_2_top100
+
+				if align_accu_2_1_top100 > best_2_1_top100:
+					best_2_1_epoch_top100 = i
+					best_2_1_top100 = align_accu_2_1_top100
 
 				print('--------------------------------------------------------------------------------------------')
 				print('Epoch', i)
@@ -158,9 +182,18 @@ def main(_):
 				print('Embedding total cost for KG1:', kg1_embedding_cost)
 				print('Embedding total cost for KG2:', kg2_embedding_cost)
 				print('Alignment total cost:', alignment_cost)
-				print('Alignment test accuracy: 1-2: {}, 2-1: {}.'.format(align_accu_1_2, align_accu_2_1))
-				print('Best 1-2 alignment epoch & accuracy: ', best_1_2_epoch, best_1_2)
-				print('Best 2-1 alignment epoch & accuracy: ', best_2_1_epoch, best_2_1)
+				print('Alignment test accuracy @1: 1-2: {}, 2-1: {}.'.format(align_accu_1_2_top1, align_accu_2_1_top1))
+				print('Best 1-2 alignment @1 epoch & accuracy: ', best_1_2_epoch_top1, best_1_2_top1)
+				print('Best 2-1 alignment @1 epoch & accuracy: ', best_2_1_epoch_top1, best_2_1_top1)
+				print('Alignment test accuracy @10: 1-2: {}, 2-1: {}.'.format(align_accu_1_2_top10,
+				                                                              align_accu_2_1_top10))
+				print('Best 1-2 alignment @10 epoch & accuracy: ', best_1_2_epoch_top10, best_1_2_top10)
+				print('Best 2-1 alignment @10 epoch & accuracy: ', best_2_1_epoch_top10, best_2_1_top10)
+				print('Alignment test accuracy @100: 1-2: {}, 2-1: {}.'.format(align_accu_1_2_top100,
+				                                                               align_accu_2_1_top100))
+				print('Best 1-2 alignment @100 epoch & accuracy: ', best_1_2_epoch_top100, best_1_2_top100)
+				print('Best 2-1 alignment @100 epoch & accuracy: ', best_2_1_epoch_top100, best_2_1_top100)
+
 				print('--------------------------------------------------------------------------------------------')
 
 		pre_v_preds = model.predict(valid_q, valid_p, v_batches)
@@ -209,7 +242,7 @@ def main(_):
 			v_accu, v_al = multi_accuracy(valid_p, v_preds, multi_kb, FLAGS.steps, FLAGS.hops, FLAGS.lan_labels)
 			t_preds = model.predict(test_q, test_p, t_batches)
 			t_accu, t_al = multi_accuracy(test_p, t_preds, multi_kb, FLAGS.steps, FLAGS.hops, FLAGS.lan_labels)
-			align_accu_1_2, align_accu_2_1 = model.align_res(a_tests, align_t_batches)
+			align_accu_1_2_top1, align_accu_2_1_top1 = model.align_res(a_tests, align_t_batches, 1)
 
 			if v_accu[-1] > best_v_accu[-1]:
 				best_v_ep = t
@@ -226,7 +259,7 @@ def main(_):
 			print('Embedding total cost for KG1:', kg1_embedding_cost)
 			print('Embedding total cost for KG2:', kg2_embedding_cost)
 			print('Alignment total cost:', alignment_cost)
-			print('Alignment test accuracy: 1-2: {}, 2-1: {}.'.format(align_accu_1_2, align_accu_2_1))
+			print('Alignment test accuracy @1: 1-2: {}, 2-1: {}.'.format(align_accu_1_2_top1, align_accu_2_1_top1))
 			print('Reasoning total cost:', reasoning_total_cost)
 			print('Training Accuracy:', tr_accu, tr_al)
 			print('Validation Accuracy:', v_accu, v_al)
