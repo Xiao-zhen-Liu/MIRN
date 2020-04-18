@@ -3,3 +3,17 @@
 /checkpoint
 results.txt
 MIRN.rar
+kb_utils.py
+/KG_ideal.rar
+/KG_real.rar
+/kb_utils.py
+/MIRN.rar
+/record.txt
+/KG_real/
+/KG_ideal/
+/MTransE/
+.gitignore
+data/data_statistics.txt
+test.sh
+/324
+data/ideal/en_KB.txt

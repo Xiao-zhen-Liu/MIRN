@@ -73,7 +73,7 @@ def read_dataset(data_file: str, data_sep = "\t"):
 			lines = f.readlines()
 	else:
 		raise Exception("!! %s is not found!!" % data_file)
-	labels = data_file.split(".")[0].split("_")
+	labels = data_file.split(".")[0].strip("data/").split("_")
 	lan_que = labels[0].lower()
 	hops = (len(labels) - 1) if labels[-1] in {"zh", "en", "fr"} else (len(labels) - 2)
 	print("Detected {} hop reasoning.".format(str(hops)))
@@ -87,13 +87,16 @@ def read_dataset(data_file: str, data_sep = "\t"):
 		else:
 			steps.append(steps[i+1] + 3)
 	is_cn = True if lan_que == "zh" else False
+	if is_cn:
+		print("Detected ZH question. Doing Chinese word segmentation.")
+		jieba.load_userdict("data/zh_entities.txt")
 	data = []  # question answer path
 	questions = []
 	qw2id = {'<unk>': 0}
 	for line in lines:
 		line = line.strip().split(data_sep)
 		if is_cn:
-			line[0] = " ".join(jieba.cut(line[0], cut_all=True))  # Use jieba to do word segmentation
+			line[0] = " ".join(jieba.cut(line[0], cut_all=False))  # Use jieba to do word segmentation
 		q_words_list = line[0].strip().split()
 		data.append([line[0], line[1]])
 		for w in q_words_list:
@@ -135,17 +138,15 @@ class KnowledgeBase(object):
 
 class MultiKnowledgeBase(object):
 
-	def __init__(self, kb1:KnowledgeBase, kb2:KnowledgeBase, align_train, align_test, is_flip:False, separator="&&&"):
-		self.a_array_all = []
-		self.a_array_train = []
-		self.a_array_test = []
+	def __init__(self, kb1:KnowledgeBase, kb2:KnowledgeBase, align_correct, is_flip:False, separator="&&&"):
+		self.a_array_correct = []
 		self.kb1 = kb1
 		self.kb2 = kb2
 		self.align_dict_1_2 = {}
 		self.align_dict_2_1 = {}
 		self.name = self.kb1.name + "+" + self.kb2.name
-		with open(align_train, "r", encoding="utf-8") as atrd:
-			for line in atrd.readlines():
+		with open(align_correct, "r", encoding="utf-8") as ac:
+			for line in ac.readlines():
 				line = line.strip().split(separator)
 				e1 = None
 				e2 = None
@@ -156,37 +157,66 @@ class MultiKnowledgeBase(object):
 				if l1 in self.kb2.ent2id.keys():
 					e2 = self.kb2.ent2id[l1]
 				if e1 is not None and e2 is not None:
-					self.a_array_all.append((e1, e2))
 					self.align_dict_1_2[e1] = e2
 					self.align_dict_2_1[e2] = e1
-					self.a_array_train.append((e1, e2))
-		with open(align_test, "r", encoding="utf-8") as atrd:
-			for line in atrd.readlines():
-				line = line.strip().split(separator)
-				e1 = None
-				e2 = None
-				l0 = line[0] if not is_flip else line[1]
-				l1 = line[1] if not is_flip else line[0]
-				if l0 in self.kb1.ent2id.keys():
-					e1 = self.kb1.ent2id[l0]
-				if l1 in self.kb2.ent2id.keys():
-					e2 = self.kb2.ent2id[l1]
-				if e1 is not None and e2 is not None:
-					self.a_array_all.append((e1, e2))
-					self.align_dict_1_2[e1] = e2
-					self.align_dict_2_1[e2] = e1
-					self.a_array_test.append((e1, e2))
-		self.a_array_all = np.array(self.a_array_all)
-		self.a_array_train = np.array(self.a_array_train)
-		self.a_array_test = np.array(self.a_array_test)
+					self.a_array_correct.append((e1, e2))
+		self.a_array_correct = np.array(self.a_array_correct)
 
-		print("Loaded alignment test pairs (used in QA dataset and MTransE testing) from", align_test,
-		      ". #pairs:", len(self.a_array_test))
-		print("Loaded alignment train pairs (used for MTransE training) from", align_train,
-		      ". #pairs:", len(self.a_array_train))
-		print("Total alignments: ", len(self.a_array_all))
-		print("Train-test ratio: ", 100*len(self.a_array_train)/len(self.a_array_all), "% : ",
-		      100*len(self.a_array_test)/len(self.a_array_all), "%")
+		print("Loaded correct alignment pairs used for training) from", align_correct,
+		      ". #pairs:", len(self.a_array_correct))
+
+	def load_pred(self, align_pred_1_2, align_pred_2_1, sep_1="&&&", sep_2="\t", sep_3 = "@@@"):
+		self.a_array_pred_1_2 = []
+		self.a_array_pred_2_1 = []
+		self.score_dict_1_2 = {}
+		self.score_dict_2_1 = {}
+		with open(align_pred_1_2, "r", encoding="utf-8") as ap12:
+			for line in ap12.readlines():
+				line = line.strip().split(sep_1)
+				e1 = self.kb1.ent2id[line[0]]
+				e1_dups = []
+				preds_top_k_str = line[1].strip().split(sep_2)
+				preds_top_k = []
+				for p in preds_top_k_str:
+					p = p.split(sep_3)
+					e2 = self.kb2.ent2id[p[0]]
+					scr = float(p[1])
+					preds_top_k.append(e2)
+					e1_dups.append(e1)
+					self.score_dict_1_2[(e1, e2)] = scr
+				self.a_array_pred_1_2.append((e1_dups, preds_top_k))
+
+		with open(align_pred_2_1, "r", encoding="utf-8") as ap21:
+			for line in ap21.readlines():
+				line = line.strip().split(sep_1)
+				e2 = self.kb2.ent2id[line[0]]
+				e2_dups = []
+				preds_top_k_str = line[1].strip().split(sep_2)
+				preds_top_k = []
+				for p in preds_top_k_str:
+					p = p.split(sep_3)
+					e1 = self.kb1.ent2id[p[0]]
+					scr = float(p[1])
+					preds_top_k.append(e1)
+					e2_dups.append(e2)
+					self.score_dict_2_1[(e2, e1)] = scr
+				self.a_array_pred_2_1.append((e2_dups, preds_top_k))
+
+
+		for i in range(len(self.kb1.ent2id)):
+			self.score_dict_1_2[(i, -1)] = 0
+
+		for j in range(len(self.kb2.ent2id)):
+			self.score_dict_2_1[(j, -1)] = 0
+
+		self.a_array_pred_1_2 = np.array(self.a_array_pred_1_2)
+		self.a_array_pred_2_1 = np.array(self.a_array_pred_2_1)
+		self.pred_k = self.a_array_pred_1_2.shape[2]
+		print("Loaded alignment prediction pairs 1 to 2 from trained alignment model from", align_pred_1_2,
+		      ". #pairs:", len(self.a_array_pred_1_2))
+		print("Loaded alignment prediction pairs 2 to 1 from trained alignment model from", align_pred_2_1,
+		      ". #pairs:", len(self.a_array_pred_2_1))
+		print("Prediction is for top {}.".format(self.pred_k))
 
 
 def process_dataset(data_file, multi_kb: MultiKnowledgeBase, data_sep="\t", path_sep="###", triple_sep="@@@"):

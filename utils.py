@@ -3,6 +3,7 @@ import numpy as np
 import tensorflow as tf
 from sklearn import metrics
 from data_utils import MultiKnowledgeBase
+from math import sqrt
 
 
 def norm(matrix):
@@ -84,7 +85,7 @@ def multi_accuracy(labels: np.ndarray, predictions: np.ndarray, multi_base: Mult
     accuracies = []
 
     for i in range(steps[-1]+1):
-        accuracies.append(round(metrics.accuracy_score(labels[:, i], predictions[:, i]), 4))
+        accuracies.append("{:.3f}".format(round(metrics.accuracy_score(labels[:, i], predictions[:, i]), 3)))
 
     align_dict_1_2 = multi_base.align_dict_1_2
     align_dict_2_1 = multi_base.align_dict_2_1
@@ -102,7 +103,7 @@ def multi_accuracy(labels: np.ndarray, predictions: np.ndarray, multi_base: Mult
                         anf += 1
                 aligned_ids = predictions[:, steps[i+1]+1].tolist()
                 l = len(alignment_labels)
-                align_accuracies += "\nAlign miss rate 2-1: " + str(round(anf / l, 4))
+                align_accuracies += "\nAlign miss rate 2-1: " + str(round(anf / l, 3))
                 a = 0
                 for i in range(l):
                     if alignment_labels[i] != 0:
@@ -110,7 +111,7 @@ def multi_accuracy(labels: np.ndarray, predictions: np.ndarray, multi_base: Mult
                             a += 1
                     else:
                         l -= 1
-                align_accuracies += ", Align accuracy 2-1: " + (str(round(a / l, 4)) if l > 0 else str(0))
+                align_accuracies += ", Align accuracy 2-1: " + (str(round(a / l, 3)) if l > 0 else str(0))
             else:
                 anf = 0
                 alignment_labels = []
@@ -122,7 +123,7 @@ def multi_accuracy(labels: np.ndarray, predictions: np.ndarray, multi_base: Mult
                         anf += 1
                 aligned_ids = predictions[:, steps[i+1]+1].tolist()
                 l = len(alignment_labels)
-                align_accuracies += "\nAlign miss rate 1-2: " + str(round(anf / l, 4))
+                align_accuracies += "\nAlign miss rate 1-2: " + str(round(anf / l, 3))
                 a = 0
                 for i in range(l):
                     if alignment_labels[i] != 0:
@@ -130,12 +131,91 @@ def multi_accuracy(labels: np.ndarray, predictions: np.ndarray, multi_base: Mult
                             a += 1
                     else:
                         l -= 1
-                align_accuracies += ", Align accuracy 1-2: " + (str(round(a / l, 4)) if l > 0 else str(0))
-    return accuracies, align_accuracies
+                align_accuracies += ", Align accuracy 1-2: " + (str(round(a / l, 3)) if l > 0 else str(0))
+
+    pl = steps[-1]+1
+    tl = len(labels)
+    cr = 0
+
+    for i in range(tl):
+        correct = True
+        for j in range(pl):
+            correct = labels[i, j] == predictions[i, j]
+            if not correct:
+                break
+        if correct:
+            cr+=1
+    accu_strict = cr/float(tl)
+
+    return accuracies, align_accuracies, "{:.3f}".format(accu_strict)
+
+def accuracy_w_res_arr(res_arr):
+    path_accuracy = []
+    for m in range(res_arr.shape[1]):
+        step_preds = res_arr[:, m]
+        path_accuracy.append("{:.3f}".format(step_preds.sum() / step_preds.shape[0]))
+
+    cr = 0
+    for path in res_arr:
+        correct = True
+        for step in path:
+            if step == 0:
+                correct = False
+                break
+        if correct:
+            cr += 1
+    accu_strict = "{:.3f}".format(cr / res_arr.shape[0])
+
+    return path_accuracy, accu_strict
+
+def k_accuracy(labels: np.ndarray, preds_k:np.ndarray):
+    # preds_k shape is (k, n, p)
+    k = preds_k.shape[0]
+    res_arr = np.zeros(preds_k[0].shape)
+    for i in range(k):
+        preds = preds_k[i]
+        for p in range(len(preds)):
+            path = preds[p]
+            for s in range(len(path)):
+                if path[s] == labels[p][s]:
+                    res_arr[p][s] = 1
+    return accuracy_w_res_arr(res_arr)
+
+def k2_accuracy(labels: np.ndarray, preds_k2:np.ndarray,  multi_base: MultiKnowledgeBase):
+    # (k2, n, p)
+    sc_dict_1_2 = multi_base.score_dict_1_2
+    sc_dict_2_1 = multi_base.score_dict_2_1
+    k2 = preds_k2.shape[0]
+    k = int(sqrt(k2))
+    res_arr = np.zeros(preds_k2[0].shape)
+    p_l = preds_k2.shape[2]
+    align_miss = 0
+    for n in range(preds_k2.shape[1]):
+        k2_pool = preds_k2[:, n]
+        pool_w_sc = []
+        for p in range(k2):
+            path = k2_pool[p]
+            score_product = sc_dict_1_2[(path[2], path[3])] * sc_dict_2_1[(path[5], path[6])]
+            pool_w_sc.append((k2_pool[p], score_product))
+            if path[3] == -1 or path[6] == -1:
+                align_miss += 1
+        sorted_pool = sorted(pool_w_sc, key = lambda x: x[1], reverse=True)
+        top_k = np.squeeze(np.delete(sorted_pool, -1, 1).tolist())[:k]
+        for i in range(k):
+            path = top_k[i]
+            for j in range(p_l):
+                if path[j] == labels[n][j]:
+                    res_arr[n][j] = 1
+    print('Align miss: {}'.format(align_miss))
+
+    return accuracy_w_res_arr(res_arr)
 
 def create_batch(instances, batch_size):
     s = list(zip(range(0, instances - batch_size, batch_size), range(batch_size, instances, batch_size)))
-    s.append(((instances - instances % batch_size, instances)))
+    if instances % batch_size != 0:
+        s.append(((instances - instances % batch_size, instances)))
+    else:
+        s.append((instances - batch_size, instances))
     return s
 
 

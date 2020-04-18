@@ -5,7 +5,6 @@ from platform import system
 
 import numpy as np
 import tensorflow as tf
-from sklearn import metrics
 from data_utils import MultiKnowledgeBase
 from utils import add_gradient_noise, zero_nil_slot, orthogonal_initializer
 
@@ -26,7 +25,6 @@ class M_IRN(object):
         self._steps = config.steps
         self._lan_labels = config.lan_labels
         self._lan_que = config.lan_que
-        self._alignment_ratio = config.alignment_ratio
         self._rel_size_1 = self._multi_kb.kb1.n_relations
         self._rel_size_2 = self._multi_kb.kb2.n_relations
         self._ent_size_1 = self._multi_kb.kb1.n_entities
@@ -34,10 +32,13 @@ class M_IRN(object):
         self._init = tf.contrib.layers.xavier_initializer()
         self._orthogonal_init = orthogonal_initializer()
         self._opt = tf.train.AdamOptimizer(learning_rate=config.lr, epsilon=config.epsilon, name="opt")
-        self._AM_opt = tf.train.AdamOptimizer(learning_rate=config.lr * config.ar, epsilon=config.epsilon,
-                                              name="AM_opt")
+        # self._AM_opt = tf.train.AdamOptimizer(learning_rate=config.lr * config.ar, epsilon=config.epsilon,
+        #                                       name="AM_opt")
         self._name = "M_IRN"
-        self._checkpoint_dir = config.checkpoint_dir + '/' + self._name
+        self._checkpoint_dir = config.checkpoint_dir + '/' + config.kb_dir + '/' +self._name
+        if not self._is_direct_align:
+            self.this_k_1_2 = config.this_k_1_2
+            self.this_k_2_1 = config.this_k_2_1
 
         if not os.path.exists(self._checkpoint_dir):
             os.makedirs(self._checkpoint_dir)
@@ -80,11 +81,11 @@ class M_IRN(object):
             print(g, v.name)
         kg2_train_op = self._opt.apply_gradients(kg2_grads_and_vars, name="kg2_train_op")
 
-        # alignment train and loss
-        alignment_batch_loss = self._align_to_train()
-        alignment_loss_op = tf.reduce_sum(alignment_batch_loss, name="alignment_loss_op")
-        alignment_train_op = self._AM_opt.minimize(alignment_loss_op)
-        ali_res_1_op, ali_res_2_op = self._align_kNN()
+        # # alignment train and loss
+        # alignment_batch_loss = self._align_to_train()
+        # alignment_loss_op = tf.reduce_sum(alignment_batch_loss, name="alignment_loss_op")
+        # alignment_train_op = self._AM_opt.minimize(alignment_loss_op)
+        # ali_res_1_op, ali_res_2_op = self._align_kNN()
 
         # cross entropy as loss for inference:
         batch_loss, inference_path = self._inference()  # (batch_size, 1), (batch_size, 6)
@@ -114,13 +115,13 @@ class M_IRN(object):
         self.kg1_train_op = kg1_train_op
         self.kg2_loss_op = kg2_loss_op
         self.kg2_train_op = kg2_train_op
-        self.alignment_loss_op = alignment_loss_op
-        self.alignment_train_op = alignment_train_op
+        # self.alignment_loss_op = alignment_loss_op
+        # self.alignment_train_op = alignment_train_op
         self.inference_loss_op = inference_loss_op
         self.inference_predict_op = inference_predict_op
         self.inference_train_op = inference_train_op
-        self.ali_res_1 = ali_res_1_op
-        self.ali_res_2 = ali_res_2_op
+        # self.ali_res_1 = ali_res_1_op
+        # self.ali_res_2 = ali_res_2_op
 
         init_op = tf.global_variables_initializer()
         table_op = tf.tables_initializer()
@@ -138,7 +139,6 @@ class M_IRN(object):
         self._padding_2 = tf.placeholder(tf.int32, [None], name="padding_2")
         self._zeros = tf.placeholder(tf.float32, [None], name="zeros")
         self._isTrain = tf.placeholder(tf.int32, name="ground_truth")
-        self._topK = tf.placeholder(tf.int32, name="topK")
 
     def _build_vars(self):
         with tf.variable_scope(self._name):
@@ -177,22 +177,41 @@ class M_IRN(object):
             self._kg2_Mrq = tf.Variable(self._init([self._embedding_size, self._embedding_size]), name="_kg2_Mrq")
             self._kg2_Mrs = tf.Variable(self._init([self._embedding_size, self._embedding_size]), name="_kg2_Mrs")
             self._kg2_Mse = tf.Variable(self._init([self._embedding_size, self._embedding_size]), name="_kg2_Mse")
-            # Transfer matrix between two languages
-            self._e_M12 = tf.Variable(self._orthogonal_init([self._embedding_size, self._embedding_size]),
-                                      name="_e_M12")
-            self._e_M21 = tf.Variable(self._orthogonal_init([self._embedding_size, self._embedding_size]),
-                                      name="_e_M21")
-            align_array = self._multi_kb.a_array_test
-            keys_tensor = tf.constant(align_array[:, 0])
-            vals_tensor = tf.constant(align_array[:, 1])
-            self._a_table_12 = tf.lookup.StaticHashTable(
-                tf.lookup.KeyValueTensorInitializer(keys_tensor, vals_tensor), -1)
-            self._a_table_21 = tf.lookup.StaticHashTable(
-                tf.lookup.KeyValueTensorInitializer(vals_tensor, keys_tensor), -1)
+            # # Transfer matrix between two languages
+            # self._e_M12 = tf.Variable(self._orthogonal_init([self._embedding_size, self._embedding_size]),
+            #                           name="_e_M12")
+            # self._e_M21 = tf.Variable(self._orthogonal_init([self._embedding_size, self._embedding_size]),
+            #                           name="_e_M21")
+            cor_align_array = self._multi_kb.a_array_correct
+            cor_key_tsr = tf.constant(cor_align_array[:, 0])
+            cor_val_tsr = tf.constant(cor_align_array[:, 1])
+            self._cor_a_table_12 = tf.lookup.StaticHashTable(
+                tf.lookup.KeyValueTensorInitializer(cor_key_tsr, cor_val_tsr), -1)
+            self._cor_a_table_21 = tf.lookup.StaticHashTable(
+                tf.lookup.KeyValueTensorInitializer(cor_val_tsr, cor_key_tsr), -1)
+            if not self._is_direct_align:
+                self._set_pred_table_2_1(self.this_k_2_1)
+                self._set_pred_table_1_2(self.this_k_1_2)
 
         self._nil_vars = {self._kg1_ent_emb.name, self._kg2_ent_emb.name,
                           self._que_emb.name, self._kg2_rel_emb.name,
                           self._kg1_rel_emb.name}  # need to keep first line 0
+
+    def _set_pred_table_1_2(self, k_idx):
+        with tf.variable_scope(self._name):
+            pred_align_array_1_2 = self._multi_kb.a_array_pred_1_2
+            pred_key_tsr_1_2 = tf.constant(pred_align_array_1_2[:, 0, 0])
+            pred_val_tsr_1_2 = tf.constant(pred_align_array_1_2[:, 1, k_idx])
+            self._pred_a_table_12 = tf.lookup.StaticHashTable(
+                tf.lookup.KeyValueTensorInitializer(pred_key_tsr_1_2, pred_val_tsr_1_2), -1)
+
+    def _set_pred_table_2_1(self, k_idx):
+        with tf.variable_scope(self._name):
+            pred_align_array_2_1 = self._multi_kb.a_array_pred_2_1
+            pred_key_tsr_2_1 = tf.constant(pred_align_array_2_1[:, 0, 0])
+            pred_val_tsr_2_1 = tf.constant(pred_align_array_2_1[:, 1, k_idx])
+            self._pred_a_table_21 = tf.lookup.StaticHashTable(
+                tf.lookup.KeyValueTensorInitializer(pred_key_tsr_2_1, pred_val_tsr_2_1), -1)
 
     def _kg1_to_train(self):
         """
@@ -238,33 +257,33 @@ class M_IRN(object):
 
             return kg2_emb_loss
 
-    def _align_to_train(self):
-        with tf.variable_scope(self._name):
-            kg1_entity_ids = self._alignments[:, 0]
-            kg1_entity_emb = tf.nn.l2_normalize(tf.nn.embedding_lookup(self._kg1_ent_emb, kg1_entity_ids),1)
-            kg2_entity_ids = self._alignments[:, 1]
-            kg2_entity_emb = tf.nn.l2_normalize(tf.nn.embedding_lookup(self._kg2_ent_emb, kg2_entity_ids),1)
-            alignment_loss_matrix = tf.subtract(tf.matmul(kg1_entity_emb, self._e_M12), kg2_entity_emb)
-            alignment_loss = tf.reduce_sum(tf.sqrt(tf.reduce_sum(tf.square(alignment_loss_matrix), 1)))
-            if self._is_dual_matrices:
-                alignment_loss_matrix = tf.subtract(tf.matmul(kg2_entity_emb, self._e_M21), kg1_entity_emb)
-                alignment_loss += tf.reduce_sum(tf.sqrt(tf.reduce_sum(tf.square(alignment_loss_matrix), 1)))
-            return alignment_loss
+    # def _align_to_train(self):
+    #     with tf.variable_scope(self._name):
+    #         kg1_entity_ids = self._alignments[:, 0]
+    #         kg1_entity_emb = tf.nn.l2_normalize(tf.nn.embedding_lookup(self._kg1_ent_emb, kg1_entity_ids),1)
+    #         kg2_entity_ids = self._alignments[:, 1]
+    #         kg2_entity_emb = tf.nn.l2_normalize(tf.nn.embedding_lookup(self._kg2_ent_emb, kg2_entity_ids),1)
+    #         alignment_loss_matrix = tf.subtract(tf.matmul(kg1_entity_emb, self._e_M12), kg2_entity_emb)
+    #         alignment_loss = tf.reduce_sum(tf.sqrt(tf.reduce_sum(tf.square(alignment_loss_matrix), 1)))
+    #         if self._is_dual_matrices:
+    #             alignment_loss_matrix = tf.subtract(tf.matmul(kg2_entity_emb, self._e_M21), kg1_entity_emb)
+    #             alignment_loss += tf.reduce_sum(tf.sqrt(tf.reduce_sum(tf.square(alignment_loss_matrix), 1)))
+    #         return alignment_loss
 
-    def _align_kNN(self):
-        with tf.variable_scope(self._name):
-            kg1_entity_ids = self._alignments[:, 0]
-            kg1_entity_emb = tf.nn.l2_normalize(tf.nn.embedding_lookup(self._kg1_ent_emb, kg1_entity_ids), 1)
-            kg2_entity_ids = self._alignments[:, 1]
-            kg2_entity_emb = tf.nn.l2_normalize(tf.nn.embedding_lookup(self._kg2_ent_emb, kg2_entity_ids), 1)
-
-            _, kg2_ent_preds = tf.nn.top_k(tf.matmul(tf.matmul(kg1_entity_emb, self._e_M12), self._kg2_ent_emb,
-                                                     transpose_b=True), k=self._topK)
-            _, kg1_ent_preds = tf.nn.top_k(tf.matmul(tf.matmul(kg2_entity_emb,
-                                                               self._e_M21 if self._is_dual_matrices else
-                                                               tf.matrix_inverse(self._e_M12)), self._kg1_ent_emb,
-                                                     transpose_b=True), k=self._topK)
-            return kg1_ent_preds, kg2_ent_preds
+    # def _align_kNN(self):
+    #     with tf.variable_scope(self._name):
+    #         kg1_entity_ids = self._alignments[:, 0]
+    #         kg1_entity_emb = tf.nn.l2_normalize(tf.nn.embedding_lookup(self._kg1_ent_emb, kg1_entity_ids), 1)
+    #         kg2_entity_ids = self._alignments[:, 1]
+    #         kg2_entity_emb = tf.nn.l2_normalize(tf.nn.embedding_lookup(self._kg2_ent_emb, kg2_entity_ids), 1)
+    #
+    #         _, kg2_ent_preds = tf.nn.top_k(tf.matmul(tf.matmul(kg1_entity_emb, self._e_M12), self._kg2_ent_emb,
+    #                                                  transpose_b=True), k=self._topK)
+    #         _, kg1_ent_preds = tf.nn.top_k(tf.matmul(tf.matmul(kg2_entity_emb,
+    #                                                            self._e_M21 if self._is_dual_matrices else
+    #                                                            tf.matrix_inverse(self._e_M12)), self._kg1_ent_emb,
+    #                                                  transpose_b=True), k=self._topK)
+    #         return kg1_ent_preds, kg2_ent_preds
 
     def _inference(self):
         with tf.variable_scope(self._name):
@@ -281,7 +300,7 @@ class M_IRN(object):
             state_emb = tf.nn.embedding_lookup(self._kg1_ent_emb, init_state_index)  # (b,1)->(b,1,e)
             state_emb = tf.squeeze(state_emb, [1])  # (batch_size, embedding_size)
             dir_align = tf.constant(self._is_direct_align, dtype=tf.bool)
-            e_M21 = tf.matrix_inverse(self._e_M12)
+            # e_M21 = tf.matrix_inverse(self._e_M12)
             # Reasoning module
             path = pre_t_idx = init_state_index
             for hop in range(self._hops):
@@ -292,44 +311,43 @@ class M_IRN(object):
                 is_cross = tf.constant(py_is_cross, dtype=tf.bool)
 
                 # Cross-lingual processing
-                head_emb = tf.cond(is_1,
-                                   lambda: tf.matmul(tf.nn.embedding_lookup(self._kg2_ent_emb,
-                                                                            tf.cast(pre_t_idx, tf.int64)),
-                                                     tf.cond(tf.constant(self._is_dual_matrices),
-                                                             lambda: self._e_M21,
-                                                             lambda: e_M21)),
-                                   lambda: tf.matmul(tf.nn.embedding_lookup(self._kg1_ent_emb,
-                                                                            tf.cast(pre_t_idx, tf.int64)), self._e_M12))
-                head_logits = tf.cond(is_1,
-                                      lambda: tf.matmul(head_emb, self._kg1_ent_emb, transpose_b=True),
-                                      lambda: tf.matmul(head_emb, self._kg2_ent_emb, transpose_b=True))
+                # head_emb = tf.cond(is_1,
+                #                    lambda: tf.matmul(tf.nn.embedding_lookup(self._kg2_ent_emb,
+                #                                                             tf.cast(pre_t_idx, tf.int64)),
+                #                                      tf.cond(tf.constant(self._is_dual_matrices),
+                #                                              lambda: self._e_M21,
+                #                                              lambda: e_M21)),
+                #                    lambda: tf.matmul(tf.nn.embedding_lookup(self._kg1_ent_emb,
+                #                                                             tf.cast(pre_t_idx, tf.int64)), self._e_M12))
+                # head_logits = tf.cond(is_1,
+                #                       lambda: tf.matmul(head_emb, self._kg1_ent_emb, transpose_b=True),
+                #                       lambda: tf.matmul(head_emb, self._kg2_ent_emb, transpose_b=True))
                 if system() == "Windows":
                     # Windows compatible
-                    head_index = tf.cond(dir_align,
-                                         lambda: tf.cond(is_1,
-                                                         lambda: self._a_table_21.lookup(tf.cast(pre_t_idx, tf.int32)),
-                                                         lambda: self._a_table_12.lookup(tf.cast(pre_t_idx, tf.int32))),
-                                         lambda: tf.cast(tf.argmax(head_logits, 1), tf.int32))
+                    if self._is_direct_align:
+                        head_index = tf.cond(is_1, lambda: self._cor_a_table_21.lookup(tf.cast(pre_t_idx, tf.int32)),
+                                             lambda: self._cor_a_table_12.lookup(tf.cast(pre_t_idx, tf.int32)))
+                    else:
+                        head_index = tf.cond(is_1, lambda: self._pred_a_table_21.lookup(tf.cast(pre_t_idx, tf.int32)),
+                                             lambda: self._pred_a_table_12.lookup(tf.cast(pre_t_idx, tf.int32)))
+
                 else:
                     # Linux compatible
-                    head_index = tf.cond(dir_align,
-                                         lambda: tf.cond(is_1,
-                                                         lambda: self._a_table_21.lookup(tf.cast(pre_t_idx, tf.int64)),
-                                                         lambda: self._a_table_12.lookup(tf.cast(pre_t_idx, tf.int64))),
-                                         lambda: tf.argmax(head_logits, 1))
+                    if self._is_direct_align:
+                        head_index = tf.cond(is_1, lambda: self._cor_a_table_21.lookup(tf.cast(pre_t_idx, tf.int64)),
+                                             lambda: self._cor_a_table_12.lookup(tf.cast(pre_t_idx, tf.int64)))
+                    else:
+                        head_index = tf.cond(is_1, lambda: self._pred_a_table_21.lookup(tf.cast(pre_t_idx, tf.int64)),
+                                             lambda: self._pred_a_table_12.lookup(tf.cast(pre_t_idx, tf.int64)))
+
                 path = tf.cond(is_cross,
                                lambda: tf.concat(axis=1, values=[path, tf.reshape(tf.cast(head_index, tf.int32),
                                                                                   [-1, 1])]),
                                lambda: path)
 
                 state_emb = tf.cond(is_cross,
-                                    lambda: tf.cond(dir_align,
-                                                    lambda: tf.cond(is_1,
-                                                                    lambda: tf.nn.embedding_lookup(
-                                                                        self._kg1_ent_emb, head_index),
-                                                                    lambda: tf.nn.embedding_lookup(
-                                                                        self._kg2_ent_emb, head_index)),
-                                                    lambda: head_emb),
+                                    lambda: tf.cond(is_1, lambda: tf.nn.embedding_lookup(self._kg1_ent_emb, head_index),
+                                                    lambda: tf.nn.embedding_lookup(self._kg2_ent_emb, head_index)),
                                     lambda: state_emb)
 
                 gate = tf.matmul(ques_emb,
@@ -427,10 +445,10 @@ class M_IRN(object):
         kg2_loss, _2 = self._sess.run([self.kg2_loss_op, self.kg2_train_op], feed_dict=feed_dict)
         return kg2_loss
 
-    def batch_train_alignment(self, alignment_seeds):
-        feed_dict = {self._alignments: alignment_seeds}
-        loss, _ = self._sess.run([self.alignment_loss_op, self.alignment_train_op], feed_dict=feed_dict)
-        return loss
+    # def batch_train_alignment(self, alignment_seeds):
+    #     feed_dict = {self._alignments: alignment_seeds}
+    #     loss, _ = self._sess.run([self.alignment_loss_op, self.alignment_train_op], feed_dict=feed_dict)
+    #     return loss
 
     def batch_train_inference(self, queries, paths):
         """
@@ -475,25 +493,25 @@ class M_IRN(object):
             res.extend(self.batch_predict(quires[s:e], path[s:e]))
         return np.array(res)
 
-    def align_res(self, alignments, batches, topK):
-        aligned_1 = []
-        aligned_2 = []
-        for s, e in batches:
-            a1, a2 = self._sess.run([self.ali_res_1, self.ali_res_2], feed_dict={self._alignments: alignments[s:e],
-                                                                                 self._topK: topK})
-            aligned_1.extend(a1)
-            aligned_2.extend(a2)
-
-        hits20_12 = 0
-        hits20_21 = 0
-        for i in range(len(alignments)):
-            if alignments[i, 1] in aligned_2[i]:
-                hits20_12 += 1
-            if alignments[i, 0] in aligned_1[i]:
-                hits20_21 += 1
-        hits20_12 = hits20_12/float(len(alignments))
-        hits20_21 = hits20_21/float(len(alignments))
-        return hits20_12, hits20_21
+    # def align_res(self, alignments, batches, topK):
+    #     aligned_1 = []
+    #     aligned_2 = []
+    #     for s, e in batches:
+    #         a1, a2 = self._sess.run([self.ali_res_1, self.ali_res_2], feed_dict={self._alignments: alignments[s:e],
+    #                                                                              self._topK: topK})
+    #         aligned_1.extend(a1)
+    #         aligned_2.extend(a2)
+    #
+    #     hits20_12 = 0
+    #     hits20_21 = 0
+    #     for i in range(len(alignments)):
+    #         if alignments[i, 1] in aligned_2[i]:
+    #             hits20_12 += 1
+    #         if alignments[i, 0] in aligned_1[i]:
+    #             hits20_21 += 1
+    #     hits20_12 = hits20_12/float(len(alignments))
+    #     hits20_21 = hits20_21/float(len(alignments))
+    #     return hits20_12, hits20_21
 
     def store(self):
         # attr = "direct_align" if self._is_direct_align else "MTransE"
